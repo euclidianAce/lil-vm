@@ -4,10 +4,20 @@
 #include <stdint.h>
 #include "ops.h"
 
+typedef enum vm_fault {
+	vm_fault_none = 0x00,
+	vm_fault_illegal_instruction,
+	vm_fault_divide_by_zero,
+} vm_fault;
+
 typedef struct vm_core {
+	// on faults pc points to the instruction that faulted
+
 	uint16_t pc;
 	uint16_t registers[16];
-	// TODO: fault flags, interrupts, etc
+	uint8_t fault;
+
+	// TODO: interrupts, vectors, etc
 } vm_core;
 
 typedef struct vm_ports {

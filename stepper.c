@@ -9,10 +9,18 @@ static void show_delta(
 	vm_state const *prev,
 	vm_state const *now
 ) {
+
 	{
 		bool diff = now->core.pc != prev->core.pc;
 		if (diff) printf("\033[33m");
-		printf("  pc:%04x\n", now->core.pc);
+		printf("  pc:%04x", now->core.pc);
+		if (diff) printf("\033[0m");
+	}
+
+	{
+		bool diff = now->core.fault != prev->core.fault;
+		if (diff) printf("\033[33m");
+		printf("  fault:%x\n", now->core.fault);
 		if (diff) printf("\033[0m");
 	}
 

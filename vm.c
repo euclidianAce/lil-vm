@@ -133,27 +133,26 @@ char const *vm_padded_reg_name(uint8_t n) {
 }
 
 
-void vm_step(vm_state *vm) {
-	uint8_t const op = vm->memory[vm->core.pc++];
-	uint8_t const b = vm->memory[vm->core.pc++];
-	uint8_t const c = vm->memory[vm->core.pc++];
+static void vm_step_impl(vm_state *vm, uint8_t op, uint8_t b, uint8_t c) {
+	if (vm->core.fault != vm_fault_none)
+		return;
 
 	switch (op) {
-	case vm_op_Nop: break;
+	case vm_op_Nop: return;
 
-	case vm_op_Load_Immediate_Byte:     *R1 = B2;               break;
-	case vm_op_Shift_In_Byte:           *R1 = (*R1 << 8) | B2;  break;
-	case vm_op_Shift_Left:              *R1 <<= *R2;            break;
-	case vm_op_Shift_Logical_Right:     *R1 >>= *R2;            break;
-	case vm_op_Shift_Arithmetic_Right:  *SR1 >>= *R2;           break;
+	case vm_op_Load_Immediate_Byte:     *R1 = B2;               return;
+	case vm_op_Shift_In_Byte:           *R1 = (*R1 << 8) | B2;  return;
+	case vm_op_Shift_Left:              *R1 <<= *R2;            return;
+	case vm_op_Shift_Logical_Right:     *R1 >>= *R2;            return;
+	case vm_op_Shift_Arithmetic_Right:  *SR1 >>= *R2;           return;
 
-	case vm_op_Copy: *R1 = *R2; break;
+	case vm_op_Copy: *R1 = *R2; return;
 
 	case vm_op_Rotate_2: {
 		uint16_t v1 = *R1, v2 = *R2;
 		*R1 = v2;
 		*R2 = v1;
-		break;
+		return;
 	}
 
 	case vm_op_Rotate_3: {
@@ -161,7 +160,7 @@ void vm_step(vm_state *vm) {
 		*R1 = v2;
 		*R2 = v3;
 		*R3 = v1;
-		break;
+		return;
 	}
 
 	case vm_op_Rotate_4: {
@@ -170,42 +169,42 @@ void vm_step(vm_state *vm) {
 		*R2 = v3;
 		*R3 = v4;
 		*R4 = v1;
-		break;
+		return;
 	}
 
 	case vm_op_Add: {
 		uint32_t result = *R3 + *R4;
 		*R1 = result >> 16;
 		*R2 = result & 0xffff;
-		break;
+		return;
 	}
 
 	case vm_op_Increment: {
 		uint32_t result = *R2 + B2;
 		*R1 = result >> 16;
 		*R2 = result & 0xffff;
-		break;
+		return;
 	}
 
 	case vm_op_Decrement: {
 		uint32_t result = *R2 - B2;
 		*R1 = result >> 16;
 		*R2 = result & 0xffff;
-		break;
+		return;
 	}
 
 	case vm_op_Subtract: {
 		uint32_t result = *R3 - *R4;
 		*R1 = result >> 16;
 		*R2 = result & 0xffff;
-		break;
+		return;
 	}
 
 	case vm_op_Unsigned_Multiply: {
 		uint32_t result = *R3 * *R4;
 		*R1 = result >> 16;
 		*R2 = result & 0xffff;
-		break;
+		return;
 	}
 
 	case vm_op_Signed_Multiply: {
@@ -215,99 +214,121 @@ void vm_step(vm_state *vm) {
 		} result = { .s = *SR3 * *SR4 };
 		*R1 = result.u >> 16;
 		*R2 = result.u & 0xffff;
-		break;
+		return;
 	}
 
 	case vm_op_Unsigned_Divide: {
+		if (*R4 == 0) {
+			vm->core.fault = vm_fault_divide_by_zero;
+			return;
+		}
 		*R1 = *R3 / *R4;
 		*R2 = *R3 % *R4;
-		break;
+		return;
 	}
 
 	case vm_op_Signed_Divide: {
+		if (*R4 == 0) {
+			vm->core.fault = vm_fault_divide_by_zero;
+			return;
+		}
 		union {
 			int16_t s;
 			uint16_t u;
 		} div = { .s = *SR3 / *SR4 }, rem = { .s = *SR3 % *SR4 };
 		*R1 = div.u;
 		*R2 = rem.u;
-		break;
+		return;
 	}
 
 	case vm_op_Compare_Signed: {
 		bool cmp = *SR3 <= *SR4;
 		*R1 = cmp;
 		*R2 = !cmp;
-		break;
+		return;
 	}
 	case vm_op_Compare_Unsigned: {
 		bool cmp = *R3 <= *R4;
 		*R1 = cmp;
 		*R2 = !cmp;
-		break;
+		return;
 	}
 	case vm_op_Compare_Equal: {
 		bool cmp = *R3 == *R4;
 		*R1 = cmp;
 		*R2 = !cmp;
-		break;
+		return;
 	}
 
-	case vm_op_Branch_Immediate_Absolute: vm->core.pc = D; break;
-	case vm_op_Branch_Immediate_Relative: vm->core.pc += SD; break;
-	case vm_op_Branch_Absolute: vm->core.pc = *R1; break;
-	case vm_op_Branch_Relative: vm->core.pc += *SR1; break;
+	case vm_op_Branch_Immediate_Absolute: vm->core.pc = D; return;
+	case vm_op_Branch_Immediate_Relative: vm->core.pc += SD; return;
+	case vm_op_Branch_Absolute: vm->core.pc = *R1; return;
+	case vm_op_Branch_Relative: vm->core.pc += *SR1; return;
 
-	case vm_op_Skip_If_Zero:     if (*R1 == 0) vm->core.pc += 3; break;
-	case vm_op_Skip_If_Non_Zero: if (*R1 != 0) vm->core.pc += 3; break;
+	case vm_op_Skip_If_Zero:     if (*R1 == 0) vm->core.pc += 3; return;
+	case vm_op_Skip_If_Non_Zero: if (*R1 != 0) vm->core.pc += 3; return;
 
-	case vm_op_Read_Address_Byte:      *R1 = vm->memory[*R2]; break;
-	case vm_op_Read_Address_Two_Byte:  *R1 = (vm->memory[*R2 + 1] << 8) | vm->memory[*R2]; break;
-	case vm_op_Write_Address_Byte:     vm->memory[*R1] = *R2; break;
-	case vm_op_Write_Address_Two_Byte: vm->memory[*R1] = *R2; vm->memory[*R1 + 1] = *R2 >> 8; break;
+	case vm_op_Read_Address_Byte:      *R1 = vm->memory[*R2]; return;
+	case vm_op_Read_Address_Two_Byte:  *R1 = (vm->memory[*R2 + 1] << 8) | vm->memory[*R2]; return;
+	case vm_op_Write_Address_Byte:     vm->memory[*R1] = *R2; return;
+	case vm_op_Write_Address_Two_Byte: vm->memory[*R1] = *R2; vm->memory[*R1 + 1] = *R2 >> 8; return;
 
-	case vm_op_Push: vm_push(vm, *R1); break;
-	case vm_op_Pop: *R1 = vm_pop(vm); break;
+	case vm_op_Push: vm_push(vm, *R1); return;
+	case vm_op_Pop: *R1 = vm_pop(vm); return;
 
 	case vm_op_Port_Write:
 		if (vm->ports.port_write)
 			vm->ports.port_write(vm->ports.context, B2, *R1);
 		// TODO: else fault
-		break;
+		return;
 	case vm_op_Port_Read:
 		if (vm->ports.port_read)
 			*R1 = vm->ports.port_read(vm->ports.context, B2);
 		// TODO: else fault
-		break;
+		return;
 
 	case vm_op_Call_Immediate_Relative: {
 		uint16_t ret_addr = vm->core.pc;
 		vm_push(vm, ret_addr);
 		vm->core.pc += D;
-		break;
+		return;
 	}
 
 	case vm_op_Call_Immediate_Absolute: {
 		uint16_t ret_addr = vm->core.pc;
 		vm_push(vm, ret_addr);
 		vm->core.pc = D;
-		break;
+		return;
 	}
 
 	case vm_op_Call_Relative: {
 		uint16_t ret_addr = vm->core.pc;
 		vm_push(vm, ret_addr);
 		vm->core.pc += *SR1;
-		break;
+		return;
 	}
 
 	case vm_op_Call_Absolute: {
 		uint16_t ret_addr = vm->core.pc;
 		vm_push(vm, ret_addr);
 		vm->core.pc = *R1;
-		break;
+		return;
 	}
 
-	case vm_op_Return: vm->core.pc = vm_pop(vm); break;
+	case vm_op_Return: vm->core.pc = vm_pop(vm); return;
 	}
+
+	vm->core.fault = vm_fault_illegal_instruction;
+}
+
+void vm_step(vm_state *vm) {
+	if (vm->core.fault != vm_fault_none) return;
+
+	uint8_t const op = vm->memory[vm->core.pc];
+	uint8_t const b = vm->memory[(uint16_t)(vm->core.pc + 1)];
+	uint8_t const c = vm->memory[(uint16_t)(vm->core.pc + 2)];
+
+	vm_step_impl(vm, op, b, c);
+
+	if (vm->core.fault == vm_fault_none) vm->core.pc += 3;
 }
