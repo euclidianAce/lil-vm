@@ -151,7 +151,6 @@ int32_t parse_integer(sv s) {
 	if (sv_starts_with(s, sv_c("abs@"))) {
 		asm_patch *patch = static_buf_add(patches);
 		sv_chop(&s, 4);
-		fprintf(stderr, "adding patch name \"%.*s\"\n", (int)s.len, s.data);
 		*patch = (asm_patch) {
 			.absolute = true,
 			.offset_to_be_relative_to = 0,
@@ -164,7 +163,6 @@ int32_t parse_integer(sv s) {
 	if (sv_starts_with(s, sv_c("rel@"))) {
 		asm_patch *patch = static_buf_add(patches);
 		sv_chop(&s, 4);
-		fprintf(stderr, "adding patch name \"%.*s\", (current_aligned_offset = %u)\n", (int)s.len, s.data, current_aligned_offset());
 		*patch = (asm_patch) {
 			.absolute = false,
 			.offset_to_be_relative_to = current_aligned_offset(),
