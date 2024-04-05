@@ -6,7 +6,7 @@ uint16_t port_read(void *_, uint8_t port_number) {
 	(void)_;
 	switch ((common_port)port_number) {
 	case common_port_terminal_input:
-		return getchar();
+		return fgetc(stdin);
 	case common_port_terminal_output:
 		break;
 	}
@@ -20,7 +20,7 @@ void port_write(void *_, uint8_t port_number, uint16_t data) {
 	case common_port_terminal_input:
 		break;
 	case common_port_terminal_output:
-		putchar((uint8_t)data);
+		fputc(data & 0x7f, stdout);
 		break;
 	}
 }
