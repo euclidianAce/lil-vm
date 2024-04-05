@@ -63,11 +63,12 @@ typedef enum asm_token_kind {
 	asm_token_register_name,
 	asm_token_decimal,
 	asm_token_hex,
-	asm_token_rel_label_ref,
-	asm_token_abs_label_ref,
+	asm_token_label_ref,
 	asm_token_label_def,
 	asm_token_position,
 } asm_token_kind;
+
+typedef enum label_ref_part { all, hi, lo } label_ref_part;
 
 typedef struct asm_token {
 	asm_token_kind kind;
@@ -75,6 +76,11 @@ typedef struct asm_token {
 		uint32_t uint;
 		int32_t sint;
 		sv str;
+		struct {
+			sv name;
+			bool absolute;
+			label_ref_part part;
+		} label_ref;
 		struct {
 			vm_op opcode;
 			vm_operands encoding;
@@ -130,21 +136,27 @@ asm_token next_token(sv *s) {
 	if (s->len == 0)
 		return (asm_token){ asm_token_eof, { 0 } };
 
-	if (sv_starts_with(*s, sv_c("abs@"))) {
-		sv_chop(s, 4);
-		sv name = sv_chop_non_whitespace(s);
-		return (asm_token){ asm_token_abs_label_ref, { .str = name } };
-	}
-
-	if (sv_starts_with(*s, sv_c("rel@"))) {
-		sv_chop(s, 4);
-		sv name = sv_chop_non_whitespace(s);
-		return (asm_token){ asm_token_rel_label_ref, { .str = name } };
-	}
-
 	sv word = sv_chop_non_whitespace(s);
 
 	if (sv_eq(word, sv_c("."))) return (asm_token){ asm_token_dot, { 0 } };
+
+#define label(prefix, is_abs, p) if (sv_starts_with(word, sv_c(prefix))) do { \
+	sv_chop(&word, sizeof "" prefix - 1); \
+	return (asm_token){ asm_token_label_ref, { .label_ref = { \
+		.name = word, \
+		.absolute = is_abs, \
+		.part = p, \
+	} } }; \
+} while (0)
+
+	label("abs@", true, all);
+	label("abshi@", true, hi);
+	label("abslo@", true, lo);
+
+	label("rel@", false, all);
+	// TODO: does it even make sense to have these?
+	label("relhi@", false, hi);
+	label("rello@", false, lo);
 
 	if (sv_first(word) == '@' && sv_last(word) == ':') {
 		if (word.len == 2) fatal("Invalid label definition \"" sv_fstr "\"", sv_farg(word));
@@ -226,7 +238,7 @@ asm_token next_token(sv *s) {
 	vm_x_instructions(X)
 #undef X
 
-	fatal("Invalid token " sv_fstr, sv_farg(word));
+	fatal("Invalid token \"" sv_fstr "\"", sv_farg(word));
 }
 
 static_buf(char, characters, 4096);
@@ -286,6 +298,7 @@ asm_label *add_label(sv name) {
 typedef struct asm_patch {
 	sv name;
 	bool absolute;
+	label_ref_part part;
 	uint16_t offset_to_be_relative_to;
 	uint16_t offset_to_patch;
 } asm_patch;
@@ -342,7 +355,7 @@ void assemble(sv contents) {
 			return;
 
 		case asm_token_instruction:
-			if (state != state_any) fatal("Unexpected instruction name");
+			if (state != state_any) fatal("Unexpected instruction name \"%s\"", vm_op_mnemonic(tk.u.instr.opcode));
 			current_encoding = tk.u.instr.encoding;
 			expected_operand_index = 0;
 			state = state_expect_operand;
@@ -426,33 +439,32 @@ void assemble(sv contents) {
 			}
 			break;
 
-		case asm_token_rel_label_ref: {
-			// TODO: label refs should error about size at patch time
-			if (expected_operand != operand_double_byte) {
-				sv expected_name = operand_name(expected_operand);
-				fatal("Unexpected label ref, expected (" sv_fstr ")", sv_farg(expected_name));
-			}
-			asm_patch *patch = static_buf_add(patches);
-			*patch = (asm_patch) {
-				.absolute = false,
-				.offset_to_be_relative_to = current_aligned_offset(),
-				.name = tk.u.str,
-				.offset_to_patch = current_offset(),
-			};
-			break;
-		}
+		case asm_token_label_ref: {
+			// TODO: allow half labels in double byte ops
+			if (state != state_expect_operand)
+				fatal("Unexpected label ref");
 
-		case asm_token_abs_label_ref: {
-			if (expected_operand != operand_double_byte) {
-				sv expected_name = operand_name(expected_operand);
-				fatal("Unexpected label ref, expected (" sv_fstr ")", sv_farg(expected_name));
-			}
+			if (expected_operand == operand_double_byte && tk.u.label_ref.part != all)
+				fatal("Expected full label ref, got half label ref");
+
+			if (expected_operand == operand_byte && tk.u.label_ref.part == all)
+				fatal("Expected half label ref, got full label ref");
+
 			asm_patch *patch = static_buf_add(patches);
 			*patch = (asm_patch) {
-				.absolute = true,
-				.name = tk.u.str,
+				.absolute = tk.u.label_ref.absolute,
+				.offset_to_be_relative_to = current_aligned_offset(),
+				.name = tk.u.label_ref.name,
 				.offset_to_patch = current_offset(),
+				.part = tk.u.label_ref.part,
 			};
+
+			switch (expected_operand) {
+			case operand_double_byte: write_byte(0xff); write_byte(0xff); break;
+			case operand_byte: write_byte(0xff); break;
+			default: break;
+			}
+
 			break;
 		}
 
@@ -490,14 +502,18 @@ void apply_patches(void) {
 			continue;
 		}
 
-		if (patch->absolute) {
-			out_buf[patch->offset_to_patch]     = ((uint16_t)label->offset) >> 8;
-			out_buf[patch->offset_to_patch + 1] = ((uint16_t)label->offset) & 0xff;
-		} else {
-			int32_t a = label->offset;
-			a -= patch->offset_to_be_relative_to;
-			out_buf[patch->offset_to_patch]     = ((uint16_t)a) >> 8;
-			out_buf[patch->offset_to_patch + 1] = ((uint16_t)a) & 0xff;
+		uint16_t value = patch->absolute
+			? label->offset
+			: (int32_t)label->offset - (int32_t)patch->offset_to_be_relative_to;
+
+		switch (patch->part) {
+		case all:
+			out_buf[patch->offset_to_patch]     = value >> 8;
+			out_buf[patch->offset_to_patch + 1] = value & 0xff;
+			break;
+
+		case hi: out_buf[patch->offset_to_patch] = value >> 8;   break;
+		case lo: out_buf[patch->offset_to_patch] = value & 0xff; break;
 		}
 	}
 
