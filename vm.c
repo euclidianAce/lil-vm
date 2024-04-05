@@ -34,21 +34,21 @@ void vm_init(vm_state *vm) {
 
 char const *vm_op_name(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return #name;
-	switch (code) { OPERATIONS(X) }
+	switch (code) { vm_x_instructions(X) }
 #undef X
 	return "???";
 }
 
 char const *vm_op_mnemonic(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return mnemonic;
-	switch (code) { OPERATIONS(X) }
+	switch (code) { vm_x_instructions(X) }
 #undef X
 	return "???";
 }
 
 vm_operands vm_op_encoding(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return vm_operands_##encoding;
-	switch (code) { OPERATIONS(X) }
+	switch (code) { vm_x_instructions(X) }
 #undef X
 	return -1;
 }

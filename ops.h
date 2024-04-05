@@ -54,7 +54,7 @@ typedef enum vm_operands {
 
 //      X(Identifier,                 asm mnemonic,  encoding)
 
-#define OPERATIONS(X) \
+#define vm_x_instructions(X) \
 	X(Nop,                        "nop",         none    ) \
 	/* Immediates */                                       \
 	X(Load_Immediate_Byte,        "lib",         rb      ) /* R1 <- B2 */ \
@@ -115,7 +115,7 @@ typedef enum vm_operands {
 // repeat/loop instructions?
 
 #define X(name, mnemonic, encoding) vm_op_##name,
-typedef enum vm_op { OPERATIONS(X) } vm_op;
+typedef enum vm_op { vm_x_instructions(X) } vm_op;
 #undef X
 
 #endif // OPS_H

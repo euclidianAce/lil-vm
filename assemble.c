@@ -223,7 +223,7 @@ asm_token next_token(sv *s) {
 #define X(id, mnemonic, enc) \
 	if (sv_eq(word, sv_c(mnemonic))) \
 		return (asm_token){ asm_token_instruction, { .instr = { .opcode = vm_op_##id, .encoding = vm_operands_##enc } } };
-	OPERATIONS(X)
+	vm_x_instructions(X)
 #undef X
 
 	fatal("Invalid token " sv_fstr, sv_farg(word));
