@@ -26,7 +26,7 @@ typedef struct vm_ports {
 	void (*port_write)(void *context, uint8_t port_number, uint16_t data);
 } vm_ports;
 
-typedef struct vm {
+typedef struct vm_state {
 	// TODO: multi core could be fun
 	vm_core core;
 	vm_ports ports;
