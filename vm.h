@@ -38,11 +38,13 @@ void vm_step(vm_state *);
 
 char const *vm_padded_reg_name(uint8_t);
 
+char const *vm_op_mnemonic(uint8_t code);
+vm_operands vm_op_encoding(uint8_t code);
+char const *vm_op_name(uint8_t);
+
 // these point to mutable static memory
-char const *op_name(uint8_t);
 char const *vm_disasm(uint8_t, uint8_t, uint8_t);
 char const *vm_disasm_pc(vm_state const *);
 
-vm_operands op_encoding(uint8_t code);
 
 #endif // VM_H

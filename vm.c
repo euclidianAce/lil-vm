@@ -32,22 +32,22 @@ void vm_init(vm_state *vm) {
 		vm->memory[i] = 0;
 }
 
-char const *op_name(uint8_t code) {
+char const *vm_op_name(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return #name;
 	switch (code) { OPERATIONS(X) }
 #undef X
 	return "???";
 }
 
-char const *op_mnemonic(uint8_t code) {
+char const *vm_op_mnemonic(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return mnemonic;
 	switch (code) { OPERATIONS(X) }
 #undef X
 	return "???";
 }
 
-vm_operands op_encoding(uint8_t code) {
-#define X(name, mnemonic, encoding) case vm_op_##name : return encoding;
+vm_operands vm_op_encoding(uint8_t code) {
+#define X(name, mnemonic, encoding) case vm_op_##name : return vm_operands_##encoding;
 	switch (code) { OPERATIONS(X) }
 #undef X
 	return -1;
@@ -82,22 +82,22 @@ char const *vm_disasm(uint8_t op, uint8_t b, uint8_t c) {
 	char *ptr = buf;
 #define addf(...) do { ptr += snprintf(ptr, buf + sizeof(buf) - ptr, "" __VA_ARGS__); } while (0)
 
-	addf("%s ", op_mnemonic(op));
+	addf("%s ", vm_op_mnemonic(op));
 
 #define reg_fmt "r%d"
 #define byte_fmt "%02x"
 #define two_byte_fmt "%04x"
 
-	switch (op_encoding(op)) {
-	case none: break;
-	case rrrr: addf(reg_fmt " " reg_fmt " " reg_fmt " " reg_fmt, R1_id, R2_id, R3_id, R4_id); break;
-	case rrr: addf(reg_fmt " " reg_fmt " " reg_fmt, R1_id, R2_id, R3_id); break;
-	case rrb: addf(reg_fmt " " reg_fmt " " byte_fmt, R1_id, R2_id, B2); break;
-	case rb: addf(reg_fmt " " byte_fmt, R1_id, B2); break;
-	case rr: addf(reg_fmt " " reg_fmt, R1_id, R2_id); break;
-	case bb: addf(byte_fmt " " byte_fmt, B1, B2); break;
-	case r: addf(reg_fmt, R1_id); break;
-	case d: addf(two_byte_fmt, D); break;
+	switch (vm_op_encoding(op)) {
+	case vm_operands_none: break;
+	case vm_operands_rrrr: addf(reg_fmt " " reg_fmt " " reg_fmt " " reg_fmt, R1_id, R2_id, R3_id, R4_id); break;
+	case vm_operands_rrr: addf(reg_fmt " " reg_fmt " " reg_fmt, R1_id, R2_id, R3_id); break;
+	case vm_operands_rrb: addf(reg_fmt " " reg_fmt " " byte_fmt, R1_id, R2_id, B2); break;
+	case vm_operands_rb: addf(reg_fmt " " byte_fmt, R1_id, B2); break;
+	case vm_operands_rr: addf(reg_fmt " " reg_fmt, R1_id, R2_id); break;
+	case vm_operands_bb: addf(byte_fmt " " byte_fmt, B1, B2); break;
+	case vm_operands_r: addf(reg_fmt, R1_id); break;
+	case vm_operands_d: addf(two_byte_fmt, D); break;
 	}
 
 #undef addf

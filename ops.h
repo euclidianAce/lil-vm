@@ -27,22 +27,30 @@
 //
 // up to 256 opcodes
 // up to 4 registers can be used as operands in one instruction
+// 
+// TODO:
+// 64 opcodes seems like about enough, the upper two bits could be used as
+// modifiers
 //
-// TODO: relative branches don't make much sense when absolute branches can fit
-// an entire address in them
+// TODO:
+// relative branches don't make much sense when absolute branches can fit an
+// entire address in them
+
+// TODO:
+// it would probably be better to try making instructions 16 or 32 bit fixed or
+// variable sized, 24 bit fixed is a bit odd
 
 typedef enum vm_operands {
-	none,
-	rrrr,
-	rrr,
-	rrb,
-	rr,
-	rb,
-	bb,
-	r,
-	d,
+	vm_operands_none,
+	vm_operands_rrrr,
+	vm_operands_rrr,
+	vm_operands_rrb,
+	vm_operands_rr,
+	vm_operands_rb,
+	vm_operands_bb,
+	vm_operands_r,
+	vm_operands_d,
 } vm_operands;
-
 
 //      X(Identifier,                 asm mnemonic,  encoding)
 

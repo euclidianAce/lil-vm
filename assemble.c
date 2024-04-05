@@ -222,7 +222,7 @@ asm_token next_token(sv *s) {
 
 #define X(id, mnemonic, enc) \
 	if (sv_eq(word, sv_c(mnemonic))) \
-		return (asm_token){ asm_token_instruction, { .instr = { .opcode = vm_op_##id, .encoding = enc } } };
+		return (asm_token){ asm_token_instruction, { .instr = { .opcode = vm_op_##id, .encoding = vm_operands_##enc } } };
 	OPERATIONS(X)
 #undef X
 
@@ -311,18 +311,18 @@ sv operand_name(operand o) {
 }
 
 void assemble(sv contents) {
-	vm_operands current_encoding = none;
+	vm_operands current_encoding = vm_operands_none;
 	uint8_t expected_operand_index = 0;
 	static operand const encoding_table[9][4] = {
-		[none] = { operand_none,        operand_none,     operand_none,     operand_none },
-		[rrrr] = { operand_register,    operand_register, operand_register, operand_register },
-		[rrr]  = { operand_register,    operand_register, operand_register, operand_none },
-		[rr]   = { operand_register,    operand_register, operand_none,     operand_none },
-		[r]    = { operand_register,    operand_none,     operand_none,     operand_none },
-		[rrb]  = { operand_register,    operand_register, operand_byte,     operand_none },
-		[rb]   = { operand_register,    operand_byte,     operand_none,     operand_none },
-		[bb]   = { operand_byte,        operand_byte,     operand_none,     operand_none },
-		[d]    = { operand_double_byte, operand_none,     operand_none,     operand_none },
+		[vm_operands_none] = { operand_none,        operand_none,     operand_none,     operand_none },
+		[vm_operands_rrrr] = { operand_register,    operand_register, operand_register, operand_register },
+		[vm_operands_rrr]  = { operand_register,    operand_register, operand_register, operand_none },
+		[vm_operands_rr]   = { operand_register,    operand_register, operand_none,     operand_none },
+		[vm_operands_r]    = { operand_register,    operand_none,     operand_none,     operand_none },
+		[vm_operands_rrb]  = { operand_register,    operand_register, operand_byte,     operand_none },
+		[vm_operands_rb]   = { operand_register,    operand_byte,     operand_none,     operand_none },
+		[vm_operands_bb]   = { operand_byte,        operand_byte,     operand_none,     operand_none },
+		[vm_operands_d]    = { operand_double_byte, operand_none,     operand_none,     operand_none },
 	};
 
 #define expected_operand encoding_table[current_encoding][expected_operand_index]
