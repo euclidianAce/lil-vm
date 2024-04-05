@@ -2,6 +2,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <assert.h>
+#include <errno.h>
 #include "vm.h"
 #include "sv.h"
 #include "static_buf.h"
@@ -17,8 +19,215 @@
 	fprintf(stderr, "Fatal error: "); \
 	fprintf(stderr, __VA_ARGS__); \
 	fprintf(stderr, "\n"); \
-	exit(10); \
+	exit(1); \
 } while (0)
+
+static char file_buf[4096];
+sv read_whole_file(char const *path) {
+	FILE *file = fopen(path, "r");
+	if (fseek(file, 0, SEEK_END) < 0) goto fail_and_exit;
+	long const count = ftell(file);
+	if (count < 0) goto fail_and_exit;
+	if ((size_t)count > sizeof file_buf) {
+		fclose(file);
+		fatal("File \"%s\" is too large (a max of %zu bytes is permitted)\n", path, sizeof file_buf);
+	}
+
+	if (fseek(file, 0, SEEK_SET) < 0) goto fail_and_exit;
+
+	size_t read_count = 0;
+	while (read_count < (size_t)count) {
+		size_t result = fread(file_buf, 1, sizeof file_buf - read_count, file);
+		if (result == 0) {
+			if (feof(file)) break;
+			if (ferror(file)) {
+				fclose(file);
+				fatal("An unknown error occurred when reading \"%s\"\n", path);
+			}
+		}
+		read_count += result;
+	}
+
+	return (sv){ read_count, file_buf };
+
+fail_and_exit: {}
+	int e = errno;
+	fclose(file);
+	fatal("Could not read file \"%s\": %s (error %d)\n", path, strerror(e), e);
+}
+
+typedef enum asm_token_kind {
+	asm_token_eof,
+	asm_token_dot,
+	asm_token_instruction,
+	asm_token_register_name,
+	asm_token_decimal,
+	asm_token_hex,
+	asm_token_rel_label_ref,
+	asm_token_abs_label_ref,
+	asm_token_label_def,
+	asm_token_position,
+} asm_token_kind;
+
+typedef struct asm_token {
+	asm_token_kind kind;
+	union {
+		uint32_t uint;
+		int32_t sint;
+		sv str;
+		struct {
+			vm_op opcode;
+			vm_operands encoding;
+		} instr;
+	} u;
+} asm_token;
+
+static inline bool dec_digit(char c) {
+	switch (c) {
+	case '0': case '1': case '2': case '3': case '4':
+	case '5': case '6': case '7': case '8': case '9':
+		return true;
+	}
+	return false;
+
+}
+
+static inline bool hex_digit(char c) {
+	switch (c) {
+	case '0': case '1': case '2': case '3': case '4':
+	case '5': case '6': case '7': case '8': case '9':
+	case 'a': case 'b': case 'c': case 'd': case 'e': case 'f':
+	case 'A': case 'B': case 'C': case 'D': case 'E': case 'F':
+		return true;
+	}
+	return false;
+}
+
+static inline uint8_t dec_digit_value(char c) {
+	assert(dec_digit(c));
+	return c - '0';
+}
+
+static inline uint8_t hex_digit_value(char c) {
+	assert(hex_digit(c));
+	if ('a' <= c && c <= 'f')
+		return 10 + c - 'a';
+	if ('A' <= c && c <= 'F')
+		return 10 + c - 'A';
+	return dec_digit_value(c);
+}
+
+asm_token next_token(sv *s) {
+	sv_chop_whitespace(s);
+
+	while (sv_first(*s) == ';') {
+		while (s->len > 0 && sv_first(*s) != '\n') {
+			sv_chop_one(s);
+		}
+		sv_chop_whitespace(s);
+	}
+
+	if (s->len == 0)
+		return (asm_token){ asm_token_eof, { 0 } };
+
+	if (sv_starts_with(*s, sv_c("abs@"))) {
+		sv_chop(s, 4);
+		sv name = sv_chop_non_whitespace(s);
+		return (asm_token){ asm_token_abs_label_ref, { .str = name } };
+	}
+
+	if (sv_starts_with(*s, sv_c("rel@"))) {
+		sv_chop(s, 4);
+		sv name = sv_chop_non_whitespace(s);
+		return (asm_token){ asm_token_rel_label_ref, { .str = name } };
+	}
+
+	sv word = sv_chop_non_whitespace(s);
+
+	if (sv_eq(word, sv_c("."))) return (asm_token){ asm_token_dot, { 0 } };
+
+	if (sv_first(word) == '@' && sv_last(word) == ':') {
+		if (word.len == 2) fatal("Invalid label definition \"" sv_fstr "\"", sv_farg(word));
+		sv_chop(&word, 1);
+		sv_chop_end(&word, 1);
+		return (asm_token){ asm_token_label_def, { .str = word } };
+	}
+
+	if (sv_first(word) == '>') {
+		sv full = word;
+		sv_chop_one(&word);
+		if (word.len != 4) { fatal("Invalid position \"" sv_fstr "\" (should have exactly 4 hex digits)", sv_farg(full)); }
+		for (uint32_t i = 0; i < word.len; ++i)
+			if (!hex_digit(word.data[i]))
+				fatal("Invalid digit '%c' in position \"" sv_fstr "\"", word.data[i], sv_farg(full));
+
+		uint16_t result = 0;
+		for (uint8_t i = 0; i < word.len; ++i) {
+			result *= 16;
+			result += hex_digit_value(word.data[i]);
+		}
+		return (asm_token){ asm_token_position, { .uint = result } };
+	}
+
+	if (sv_first(word) == '#') {
+		sv full = word;
+		if (full.len != 3) { fatal("Invalid hex literal \"" sv_fstr "\" (should have exactly 2 digits)", sv_farg(full)); }
+		sv_chop(&word, 1);
+
+		for (uint32_t i = 0; i < word.len; ++i)
+			if (!hex_digit(word.data[i]))
+				fatal("Invalid digit '%c' in hex literal \"" sv_fstr "\"", word.data[i], sv_farg(full));
+
+		return (asm_token){ asm_token_hex, { .uint = (hex_digit_value(word.data[0]) << 4) | hex_digit_value(word.data[1]) } };
+	}
+
+	if (dec_digit(sv_first(word))) {
+		uint32_t result = 0;
+		bool overflow = false;
+		for (uint32_t i = 0; i < word.len; ++i) {
+			char digit = word.data[i];
+
+			if (!dec_digit(digit))
+				fatal("Invalid decimal digit '%c' in \"" sv_fstr "\"", digit, sv_farg(word));
+
+			result *= 10;
+			result += dec_digit_value(digit);
+
+			if (result > 0xffff)
+				overflow = true;
+		}
+		if (overflow)
+			fatal("Decimal number " sv_fstr " too large, (max of 65535 or 0xffff)", sv_farg(word));
+		return (asm_token){ asm_token_decimal, { .uint = result } };
+	}
+
+	// Is this dumb? yes.
+	// Does it work? also yes.
+	if (sv_eq(word, sv_c("r0"))) return (asm_token){ asm_token_register_name, { .uint = 0 } };
+	if (sv_eq(word, sv_c("r1"))) return (asm_token){ asm_token_register_name, { .uint = 1 } };
+	if (sv_eq(word, sv_c("r2"))) return (asm_token){ asm_token_register_name, { .uint = 2 } };
+	if (sv_eq(word, sv_c("r3"))) return (asm_token){ asm_token_register_name, { .uint = 3 } };
+	if (sv_eq(word, sv_c("r4"))) return (asm_token){ asm_token_register_name, { .uint = 4 } };
+	if (sv_eq(word, sv_c("r5"))) return (asm_token){ asm_token_register_name, { .uint = 5 } };
+	if (sv_eq(word, sv_c("r6"))) return (asm_token){ asm_token_register_name, { .uint = 6 } };
+	if (sv_eq(word, sv_c("r7"))) return (asm_token){ asm_token_register_name, { .uint = 7 } };
+	if (sv_eq(word, sv_c("r8"))) return (asm_token){ asm_token_register_name, { .uint = 8 } };
+	if (sv_eq(word, sv_c("r9"))) return (asm_token){ asm_token_register_name, { .uint = 9 } };
+	if (sv_eq(word, sv_c("r10"))) return (asm_token){ asm_token_register_name, { .uint = 10 } };
+	if (sv_eq(word, sv_c("r11"))) return (asm_token){ asm_token_register_name, { .uint = 11 } };
+	if (sv_eq(word, sv_c("r12"))) return (asm_token){ asm_token_register_name, { .uint = 12 } };
+	if (sv_eq(word, sv_c("r13"))) return (asm_token){ asm_token_register_name, { .uint = 13 } };
+	if (sv_eq(word, sv_c("r14"))) return (asm_token){ asm_token_register_name, { .uint = 14 } };
+	if (sv_eq(word, sv_c("r15"))) return (asm_token){ asm_token_register_name, { .uint = 15 } };
+
+#define X(id, mnemonic, enc) \
+	if (sv_eq(word, sv_c(mnemonic))) \
+		return (asm_token){ asm_token_instruction, { .instr = { .opcode = vm_op_##id, .encoding = enc } } };
+	OPERATIONS(X)
+#undef X
+
+	fatal("Invalid token " sv_fstr, sv_farg(word));
+}
 
 static_buf(char, characters, 4096);
 sv copy_sv(sv s) {
@@ -40,6 +249,8 @@ static inline void pad(void) {
 	}
 }
 
+static inline uint8_t *last_byte_written(void) { return out_cursor - 1; }
+
 static inline uint16_t current_offset(void) { return out_cursor - out_buf; }
 static inline uint16_t current_aligned_offset(void) {
 	uint16_t actual = current_offset();
@@ -53,21 +264,23 @@ typedef struct asm_label {
 
 static_buf(asm_label, labels, 512);
 
-asm_label *add_label(sv name) {
-	if (static_buf_count(labels) >= static_buf_max_count(labels))
-		fatal("Too many labels defined");
-	asm_label *result = static_buf_add(labels);
-	result->name = copy_sv(name);
-	result->offset = current_offset();
-	return result;
-}
-
 asm_label *find_label(sv name) {
 	for (size_t i = 0, c = static_buf_count(labels); i < c; ++i) {
 		if (sv_eq(name, labels[i].name))
 			return &labels[i];
 	}
 	return NULL;
+}
+
+asm_label *add_label(sv name) {
+	if (static_buf_count(labels) >= static_buf_max_count(labels))
+		fatal("Too many labels defined");
+	if (find_label(name))
+		fatal("Redefinition of label \"" sv_fstr "\"", sv_farg(name));
+	asm_label *result = static_buf_add(labels);
+	result->name = copy_sv(name);
+	result->offset = current_offset();
+	return result;
 }
 
 typedef struct asm_patch {
@@ -79,263 +292,185 @@ typedef struct asm_patch {
 
 static_buf(asm_patch, patches, 1024);
 
-// trims leading whitespace
-//
-// returns NULL on eof
-// exits on error
-sv read_line(FILE *file) {
-	static char buf[1024];
-	static char *start = buf, *end = buf;
+typedef enum operand {
+	operand_none,
+	operand_register,
+	operand_byte,
+	operand_double_byte,
+} operand;
 
-	if (start >= end)  {
-		if (feof(file)) return (sv){ 0, NULL };
+sv operand_name(operand o) {
+	switch (o) {
+	case operand_none: return sv_c("nothing");
+	case operand_register: return sv_c("register");
+	case operand_byte: return sv_c("byte");
+	case operand_double_byte: return sv_c("double byte");
+	}
 
-		start = buf;
-		size_t result = fread(start, 1, sizeof buf, file);
-		if (result == 0) {
-			if (feof(file)) return (sv){ 0, NULL };
-			if (ferror(file)) {
-				fprintf(stderr, "Error reading file\n");
-				fclose(file);
-				exit(1);
+	return sv_c("???");
+}
+
+void assemble(sv contents) {
+	vm_operands current_encoding = none;
+	uint8_t expected_operand_index = 0;
+	static operand const encoding_table[9][4] = {
+		[none] = { operand_none,        operand_none,     operand_none,     operand_none },
+		[rrrr] = { operand_register,    operand_register, operand_register, operand_register },
+		[rrr]  = { operand_register,    operand_register, operand_register, operand_none },
+		[rr]   = { operand_register,    operand_register, operand_none,     operand_none },
+		[r]    = { operand_register,    operand_none,     operand_none,     operand_none },
+		[rrb]  = { operand_register,    operand_register, operand_byte,     operand_none },
+		[rb]   = { operand_register,    operand_byte,     operand_none,     operand_none },
+		[bb]   = { operand_byte,        operand_byte,     operand_none,     operand_none },
+		[d]    = { operand_double_byte, operand_none,     operand_none,     operand_none },
+	};
+
+#define expected_operand encoding_table[current_encoding][expected_operand_index]
+
+	enum {
+		state_any,
+		state_expect_operand,
+	} state = state_any;
+
+	for (;;) {
+		asm_token tk = next_token(&contents);
+
+		switch (tk.kind) {
+		case asm_token_eof:
+			if (state != state_any)
+				fatal("Unexpected end of file");
+			return;
+
+		case asm_token_instruction:
+			if (state != state_any) fatal("Unexpected instruction name");
+			current_encoding = tk.u.instr.encoding;
+			expected_operand_index = 0;
+			state = state_expect_operand;
+
+			write_byte(tk.u.instr.opcode);
+			continue;
+
+		case asm_token_position:
+			if (state != state_any) fatal("Unexpected position");
+			out_cursor = out_buf + tk.u.uint;
+			break;
+
+		case asm_token_dot: {
+			uint16_t to_write = current_aligned_offset();
+			switch (expected_operand) {
+			case operand_byte:
+				if (to_write > 255)
+					fatal("Expected a byte, but current offset (.) is too large (%u)", to_write);
+				write_byte((uint8_t)to_write);
+				break;
+			case operand_double_byte:
+				write_byte(to_write >> 8);
+				write_byte((uint8_t)to_write);
+				break;
+			default: {
+				sv expected_name = operand_name(expected_operand);
+				fatal("Unexpected ., expected " sv_fstr, sv_farg(expected_name));
 			}
+			}
+			break;
 		}
-		end = start + result;
-	}
 
-	char *cursor = start;
-	while (cursor < end && *cursor != '\n')
-		++cursor;
-
-	while (start < cursor && (*start == ' ' || *start == '\t'))
-		++start;
-
-	static char ret_buf[1024];
-	size_t len = cursor - start;
-	++cursor;
-	memcpy(ret_buf, start, len);
-	start = cursor;
-
-	return (sv){ len, ret_buf };
-}
-
-int8_t register_name(sv s) {
-	// fprintf(stderr, "register_name(\"%.*s\")\n", (int)s.len, s.data);
-	if (s.len == 0) return -1;
-	if (s.data[0] != 'r')
-		return -1;
-
-	if (s.len == 2) {
-		switch (s.data[1]) {
-		case '0': case '1': case '2': case '3': case '4':
-		case '5': case '6': case '7': case '8': case '9':
-			return s.data[1] - '0';
-		}
-	} else if (s.len == 3) {
-		if (s.data[1] != '1')
-			return -1;
-		switch (s.data[2]) {
-		case '0': case '1': case '2':
-		case '3': case '4': case '5':
-			return s.data[2] - '0' + 10;
-		}
-	}
-
-	return -1;
-}
-
-int32_t parse_integer(sv s) {
-	if (sv_eq(s, sv_c(".")))
-		return current_aligned_offset();
-
-	if (sv_starts_with(s, sv_c("abs@"))) {
-		asm_patch *patch = static_buf_add(patches);
-		sv_chop(&s, 4);
-		*patch = (asm_patch) {
-			.absolute = true,
-			.offset_to_be_relative_to = 0,
-			.name = copy_sv(s),
-			.offset_to_patch = current_offset(),
-		};
-		return 0xffff;
-	}
-
-	if (sv_starts_with(s, sv_c("rel@"))) {
-		asm_patch *patch = static_buf_add(patches);
-		sv_chop(&s, 4);
-		*patch = (asm_patch) {
-			.absolute = false,
-			.offset_to_be_relative_to = current_aligned_offset(),
-			.name = copy_sv(s),
-			.offset_to_patch = current_offset(),
-		};
-		return 0xffff;
-	}
-
-	uint32_t result = 0;
-	uint8_t base = 10;
-
-	for (uint32_t i = 0; i < s.len; ++i) {
-		switch (s.data[i]) {
-		case '#':
-			if (i == 0) {
-				base = 16;
+		case asm_token_register_name:
+			if (expected_operand != operand_register) {
+				sv expected_name = operand_name(expected_operand);
+				fatal("Unexpected register name, expected " sv_fstr, sv_farg(expected_name));
+			}
+			if (expected_operand_index % 2 == 0) {
+				write_byte((uint8_t)tk.u.uint << 4);
 			} else {
-				return -1;
+				*last_byte_written() |= (uint8_t)tk.u.uint;
 			}
 			break;
-		case '0': case '1': case '2': case '3': case '4':
-		case '5': case '6': case '7': case '8': case '9':
-			result *= base;
-			result += s.data[i] - '0';
-			break;
-		case 'a': case 'b': case 'c': case 'd': case 'e': case 'f':
-			if (base == 16) {
-				result *= base;
-				result += s.data[i] - 'a' + 10;
-			} else {
-				return -1;
+
+		case asm_token_decimal:
+			switch (expected_operand) {
+			case operand_byte:
+				if (tk.u.uint > 255)
+					fatal("Expected a byte, but %u is too large", tk.u.uint);
+				write_byte((uint8_t)tk.u.uint);
+				break;
+			case operand_double_byte:
+				write_byte((uint16_t)tk.u.uint >> 8);
+				write_byte((uint8_t)tk.u.uint);
+				break;
+			default: {
+				sv expected_name = operand_name(expected_operand);
+				fatal("Unexpected dec number, expected " sv_fstr, sv_farg(expected_name));
+			}
 			}
 			break;
-		default:
-			return -1;
+
+		case asm_token_hex:
+			if (state == state_any) {
+				write_byte((uint8_t)tk.u.uint);
+				break;
+			}
+
+			switch (expected_operand) {
+			case operand_byte:
+				write_byte((uint8_t)tk.u.uint);
+				break;
+			case operand_double_byte:
+				write_byte(0);
+				write_byte((uint8_t)tk.u.uint);
+				break;
+			default: {
+				sv expected_name = operand_name(expected_operand);
+				fatal("Unexpected hex number, expected " sv_fstr, sv_farg(expected_name));
+			}
+			}
+			break;
+
+		case asm_token_rel_label_ref: {
+			// TODO: label refs should error about size at patch time
+			if (expected_operand != operand_double_byte) {
+				sv expected_name = operand_name(expected_operand);
+				fatal("Unexpected label ref, expected (" sv_fstr ")", sv_farg(expected_name));
+			}
+			asm_patch *patch = static_buf_add(patches);
+			*patch = (asm_patch) {
+				.absolute = false,
+				.offset_to_be_relative_to = current_aligned_offset(),
+				.name = tk.u.str,
+				.offset_to_patch = current_offset(),
+			};
+			break;
 		}
 
-		if (result > 0xffff)
-			return -1;
+		case asm_token_abs_label_ref: {
+			if (expected_operand != operand_double_byte) {
+				sv expected_name = operand_name(expected_operand);
+				fatal("Unexpected label ref, expected (" sv_fstr ")", sv_farg(expected_name));
+			}
+			asm_patch *patch = static_buf_add(patches);
+			*patch = (asm_patch) {
+				.absolute = true,
+				.name = tk.u.str,
+				.offset_to_patch = current_offset(),
+			};
+			break;
+		}
+
+		case asm_token_label_def: {
+			if (state != state_any) fatal("Unexpected label definition");
+			add_label(tk.u.str);
+			break;
+		}
+		}
+
+		if (state == state_expect_operand) {
+			++expected_operand_index;
+			if (expected_operand == operand_none) {
+				state = state_any;
+				pad();
+			}
+		}
 	}
-
-	return (uint16_t)result;
-}
-
-void assemble_line(sv line) {
-	if (line.len == 0) return;
-
-	sv word = sv_chop_word(&line);
-
-	if (sv_first(word) == '@') {
-		if (sv_last(word) != ':') { todo("bad label name"); }
-		if (word.len == 2) { todo("bad label name"); }
-
-		sv name = word;
-		sv_chop(&name, 1);
-		sv_chop_end(&name, 1);
-
-		add_label(name);
-
-		word = sv_chop_word(&line);
-	}
-
-	if (word.len == 0) return;
-
-	vm_op opcode;
-	vm_operands encoding;
-
-#define X(id, mnemonic, enc) if (sv_eq(word, sv_from_c(mnemonic))) { \
-	opcode = vm_op_##id; \
-	encoding = enc; \
-	goto found; \
-}
-	OPERATIONS(X)
-#undef X
-
-	fprintf(stderr, "Unknown instruction \"%.*s\". (TODO: make this better)\n", (int)word.len, word.data);
-	exit(1);
-
-found: {}
-
-	write_byte(opcode);
-
-#define expect_reg(out_reg) do { \
-	int8_t _reg_ = register_name(sv_chop_word(&line)); \
-	if (_reg_ < 0) { todo("report error, expected register name"); } \
-	out_reg = _reg_; \
-} while (0)
-
-#define expect_byte(out_byte) do { \
-	int32_t _byte_ = parse_integer(sv_chop_word(&line)); \
-	if (_byte_ < 0) { todo("report error, invalid digits"); } \
-	if (_byte_ > 255) { todo("report error, byte too big"); } \
-	out_byte = (uint8_t)_byte_; \
-} while (0)
-
-#define expect_double_byte(out_double_byte) do { \
-	int32_t _double_byte_ = parse_integer(sv_chop_word(&line)); \
-	if (_double_byte_ < 0) { todo("report error, invalid digits"); } \
-	out_double_byte = (uint16_t)_double_byte_; \
-} while (0)
-
-#define expect_eol() do { sv word = sv_chop_word(&line); if (word.len > 0) { todo("report error, trailing characters"); } } while (0)
-
-	switch (encoding) {
-	case none: expect_eol(); break;
-	case rrrr: {
-		uint8_t reg_1 = 0; expect_reg(reg_1);
-		uint8_t reg_2 = 0; expect_reg(reg_2);
-		uint8_t reg_3 = 0; expect_reg(reg_3);
-		uint8_t reg_4 = 0; expect_reg(reg_4);
-		write_byte((reg_1 << 4) | reg_2);
-		write_byte((reg_3 << 4) | reg_4);
-		expect_eol();
-		break;
-	}
-	case rrr: {
-		uint8_t reg_1 = 0; expect_reg(reg_1);
-		uint8_t reg_2 = 0; expect_reg(reg_2);
-		uint8_t reg_3 = 0; expect_reg(reg_3);
-		write_byte((reg_1 << 4) | reg_2);
-		write_byte(reg_3 << 4);
-		expect_eol();
-		break;
-	}
-	case rr: {
-		uint8_t reg_1 = 0; expect_reg(reg_1);
-		uint8_t reg_2 = 0; expect_reg(reg_2);
-		write_byte((reg_1 << 4) | reg_2);
-		expect_eol();
-		break;
-	}
-	case r: {
-		uint8_t reg = 0; expect_reg(reg);
-		write_byte(reg << 4);
-		expect_eol();
-		break;
-	}
-	case rb: {
-		uint8_t reg = 0; expect_reg(reg);
-		write_byte(reg << 4);
-		uint8_t b = 0; expect_byte(b);
-		write_byte(b);
-		expect_eol();
-		break;
-	}
-	case rrb: {
-		uint8_t reg_1 = 0; expect_reg(reg_1);
-		uint8_t reg_2 = 0; expect_reg(reg_2);
-		write_byte((reg_1 << 4) | reg_2);
-		uint8_t b = 0; expect_byte(b);
-		write_byte(b);
-		expect_eol();
-		break;
-	}
-	case bb: {
-		uint8_t b = 0;
-		expect_byte(b); write_byte(b);
-		expect_byte(b); write_byte(b);
-		expect_eol();
-		break;
-	}
-	case d: {
-		 uint16_t db = 0;
-		 expect_double_byte(db);
-		 write_byte(db >> 8);
-		 write_byte(db & 0xff);
-		 expect_eol();
-		 break;
-	}
-	}
-
-	pad();
 }
 
 void apply_patches(void) {
@@ -361,7 +496,6 @@ void apply_patches(void) {
 		} else {
 			int32_t a = label->offset;
 			a -= patch->offset_to_be_relative_to;
-			a -= 3;
 			out_buf[patch->offset_to_patch]     = ((uint16_t)a) >> 8;
 			out_buf[patch->offset_to_patch + 1] = ((uint16_t)a) & 0xff;
 		}
@@ -372,30 +506,20 @@ void apply_patches(void) {
 }
 
 int main(int argc, char **argv) {
-	if (argc != 2) {
-		fprintf(stderr, "Usage: assemble <program.asm>\n");
+	if (argc != 2 && argc != 3) {
+		fprintf(stderr, "Usage: assemble <program.asm> [output]\n");
 		return 1;
 	}
 
 	char const *file_name = argv[1];
-	FILE *file = fopen(file_name, "r");
-	if (!file) {
-		fprintf(stderr, "Could not open file.\n");
-		return 1;
-	}
+	char const *out_file_name = argc == 3 ? argv[2] : "out";
 
-	sv line;
-	while ((line = read_line(file)).data)
-		assemble_line(line);
-
-	fclose(file);
-
+	sv contents = read_whole_file(file_name);
+	assemble(contents);
 	apply_patches();
 
-	char const *out_file_name = "out";
-
 	size_t result_len = out_cursor - out_buf;
-	FILE *output = fopen(out_file_name, "wc");
+	FILE *output = fopen(out_file_name, "wbc");
 	{
 		size_t result = fwrite(out_buf, 1, result_len, output);
 		if (result != result_len) {
