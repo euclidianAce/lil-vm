@@ -28,6 +28,8 @@
 // up to 256 opcodes
 // up to 4 registers can be used as operands in one instruction
 //
+// TODO: relative branches don't make much sense when absolute branches can fit
+// an entire address in them
 
 typedef enum vm_operands {
 	none,
