@@ -1,5 +1,6 @@
 #include "sv.h"
 #include <string.h>
+#include <assert.h>
 
 sv sv_from_c(char const *c) {
 	return (sv){ strlen(c), c };
@@ -16,7 +17,7 @@ bool sv_eq(sv a, sv b) {
 	return true;
 }
 
-static bool whitespace(char c) {
+static inline bool whitespace(char c) {
 	switch (c) {
 	case ' ':
 	case '\t':
@@ -26,7 +27,16 @@ static bool whitespace(char c) {
 	return false;
 }
 
+char sv_chop_one(sv *s) {
+	assert(s->len >= 1);
+	char result = *s->data;
+	s->data += 1;
+	s->len -= 1;
+	return result;
+}
+
 sv sv_chop(sv *s, uint32_t n) {
+	assert(s->len >= n);
 	sv result = { n, s->data };
 	s->len -= n;
 	s->data += n;
@@ -39,19 +49,12 @@ sv sv_chop_end(sv *s, uint32_t n) {
 	return result;
 }
 
-sv sv_chop_whitespace(sv *s) {
-	uint32_t count = 0;
-	while (count < s->len && whitespace(s->data[count]))
-		++count;
-	return sv_chop(s, count);
-}
+sv sv_chop_whitespace(sv *s) { sv_chop_body(s, c, whitespace(c)); }
+sv sv_chop_non_whitespace(sv *s) { sv_chop_body(s, c, !whitespace(c)); }
 
 sv sv_chop_word(sv *s) {
 	sv_chop_whitespace(s);
-	uint32_t count = 0;
-	while (count < s->len && !whitespace(s->data[count]))
-		++count;
-	return sv_chop(s, count);
+	return sv_chop_non_whitespace(s);
 }
 
 char sv_first(sv s) {
