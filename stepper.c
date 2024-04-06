@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include "sv.h"
 #include "vm.h"
 #include "mnemonics.h"
 #include "common_ports.h"
@@ -70,29 +71,59 @@ static void show_delta(
 
 #include "vm_utils.c"
 
-void copy_vm_state(vm_state *to, vm_state const *from) {
+static void copy_vm_state(vm_state *to, vm_state const *from) {
 	assert(from->core_count == to->core_count);
 	memcpy(to->cores, from->cores, from->core_count * sizeof(vm_core));
 	memcpy(to->memory, from->memory, sizeof from->memory);
 }
 
+static void usage(void) {
+	fprintf(stderr, "Usage: stepper [-c cores=1] <program.asm>\n");
+}
+
 int main(int argc, char **argv) {
-	if (argc != 2) {
-		fprintf(stderr, "Usage: stepper <program.asm>\n");
+	char const *file_name = "";
+	int core_count = 1;
+
+	switch (argc) {
+	default: usage(); return 1;
+
+	case 2: {
+		sv arg = sv_from_c(argv[1]);
+		if (sv_starts_with(arg, sv_c("-c"))) { usage(); return 1; }
+		file_name = argv[1];
+		break;
+	}
+	case 3: {
+		sv arg = sv_from_c(argv[1]);
+		if (!sv_starts_with(arg, sv_c("-c"))) { usage(); return 1; }
+		sv_chop(&arg, 2);
+		core_count = atoi(arg.data);
+		file_name = argv[2];
+		break;
+	}
+
+	case 4: {
+		if (!sv_eq(sv_c("-c"), sv_from_c(argv[1]))) { usage(); return 1; }
+		core_count = atoi(argv[2]);
+		file_name = argv[3];
+		break;
+	}
+	}
+
+	if (core_count <= 0 || core_count >= 256) {
+		usage();
+		fprintf(stderr, "Invalid core count given.");
 		return 1;
 	}
 
-	char const *file_name = argv[1];
-
-#define STATIC_CORE_COUNT 3
+	static vm_core core_storage[512];
 
 	common_port_state state;
 	vm_state prev, now;
-	vm_core prev_cores[STATIC_CORE_COUNT];
-	vm_core now_cores[STATIC_CORE_COUNT];
-	vm_init(&now, STATIC_CORE_COUNT, now_cores);
-	prev.cores = prev_cores;
-	prev.core_count = STATIC_CORE_COUNT;
+	vm_init(&now, core_count, core_storage);
+	prev.cores = core_storage + core_count;
+	prev.core_count = core_count;
 
 	vm_install_common_ports(&prev, &state);
 	vm_install_common_ports(&now, &state);
@@ -103,7 +134,7 @@ int main(int argc, char **argv) {
 
 	show_delta(&prev, &now);
 
-	for (uint16_t core_index = 0; !state.wrote_to_shut_down;) {
+	for (uint8_t core_index = 0; !state.wrote_to_shut_down;) {
 		printf(
 			"\nCore %u, Next instruction: \033[1m%s\033[0m (raw %02x %02x %02x)\nPress enter to continue, Control+C to quit.\n",
 			core_index,
@@ -124,7 +155,7 @@ int main(int argc, char **argv) {
 		}
 
 		core_index += 1;
-		core_index %= STATIC_CORE_COUNT;
+		core_index %= core_count;
 	}
 
 	if (state.wrote_to_shut_down)
