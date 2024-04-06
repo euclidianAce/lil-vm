@@ -70,16 +70,17 @@ int main(int argc, char **argv) {
 
 	char const *file_name = argv[1];
 
+	common_port_state state;
 	vm_state prev, now;
 	vm_init(&now);
-	initialize_extra(&now);
+	initialize_extra(&now, &state);
 
 	read_file_to_vm_memory(&now, file_name);
 
 	memcpy(&prev, &now, sizeof now);
 	show_delta(&prev, &now);
 
-	for (;;) {
+	for (; !state.wrote_to_shut_down && now.core.fault == vm_fault_none;) {
 		printf(
 			"\nNext instruction: \033[1m%s\033[0m (raw %02x %02x %02x)\nPress enter to continue, Control+C to quit.\n",
 			vm_disasm_pc(&now),
@@ -91,5 +92,12 @@ int main(int argc, char **argv) {
 		vm_step(&now);
 		show_delta(&prev, &now);
 		memcpy(&prev, &now, sizeof now);
+	}
+
+	if (state.wrote_to_shut_down)
+		printf("Machine requested shut down.\n");
+	if (now.core.fault != vm_fault_none) {
+		printf("Machine faulted with fault %u (%s) at pc=%04x.\n", now.core.fault, vm_fault_name(now.core.fault), now.core.pc);
+		return now.core.fault;
 	}
 }

@@ -1,8 +1,8 @@
 #include <stdlib.h>
 
 // installs common ports and sets up stack pointer
-void initialize_extra(vm_state *vm) {
-	vm_install_common_ports(vm);
+void initialize_extra(vm_state *vm, common_port_state *state) {
+	vm_install_common_ports(vm, state);
 	vm->core.registers[15] = 0xf000;
 }
 

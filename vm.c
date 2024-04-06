@@ -53,7 +53,16 @@ vm_operands vm_op_encoding(uint8_t code) {
 	return -1;
 }
 
-#define unimplemented() do { fprintf(stderr, "Unimplemented opcode %s\n", vm_disasm(op, b, c)); abort(); } while (0)
+
+char const *vm_fault_name(vm_fault f) {
+	switch (f) {
+	case vm_fault_none: return "none";
+	case vm_fault_illegal_instruction: return "illegal instruction";
+	case vm_fault_divide_by_zero: return "divide by zero";
+	}
+	return "???";
+}
+
 
 #define R1_id (b >> 4)
 #define R2_id (b & 0x0f)
