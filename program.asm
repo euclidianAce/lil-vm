@@ -8,20 +8,26 @@
 
 	; main core
 	; just waste some cycles to emulate setting things up
-	nop nop nop nop nop
-	nop nop nop nop nop
-	nop nop nop nop nop
+	nop nop nop nop
+	nop nop nop nop
 
 	; unlock other cores
 	ncores r1
-	wad r0 r1
+	dec r1 r1 1
+	wab r0 r1
 
-	; spin
-	bia .
+	; when other cores are done they will decrement init lock
+@main-spin:
+	rab r1 r0
+	sz r1
+	bia abs@main-spin
+
+	; power off
+	portw r0 #ff
 
 @aux-cores: ; core# is in r1
 @spin-on-init-lock:
-	rad r3 r0
+	rab r3 r0
 	snz r3
 	bia abs@spin-on-init-lock
 
@@ -29,7 +35,8 @@
 	add r5 r4 r4 r1
 	portw r4 151
 
-	; TODO: atomically decrement init-lock
+	lib r4 #ff
+	fetchadd r4 r0 r4
 
 	; spin
 	bia .

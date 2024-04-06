@@ -100,7 +100,7 @@ typedef enum vm_operands {
 	/* External/Device IO */                               \
 	X(Port_Write,                 "portw",       rb      ) /* port(B2) <- R1  */ \
 	X(Port_Read,                  "portr",       rb      ) /* R1 <- port(B2) */ \
-	/* Subroutines/Stack */ \
+	/* Subroutines/Stack */                                \
 	X(Push,                       "push",        r       ) /* r15 <- r15 + 2, memory[r15] <- R1 */ \
 	X(Pop,                        "pop",         r       ) /* R1 <- memory[r15], r15 <- r15 + 1 */ \
 	X(Call_Immediate_Relative,    "callir",      d       ) /* push absolute return address, branch immediate relative */ \
@@ -112,7 +112,8 @@ typedef enum vm_operands {
 	X(Core,                       "core",        r       ) /* R1 <- current core id */ \
 	X(Count_Cores,                "ncores",      r       ) /* R1 <- total number of cores */ \
 	X(Fault,                      "fault",       none    ) /* trigger a manual fault */ \
-
+	/* Atomics */                                          \
+	X(Fetch_And_Add_Byte,         "fetchadd",    rrr     ) /* (atomically) R1 = memory[R2], memory[R2] = memory[R2] + R3,  */ \
 
 // TODO:
 // bit test/scan?

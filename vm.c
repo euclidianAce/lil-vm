@@ -341,6 +341,14 @@ static bool vm_step_impl(vm_state *vm, uint8_t core_index, uint8_t op, uint8_t b
 	case vm_op_Core:        *R1 = core_index;     return true;
 	case vm_op_Count_Cores: *R1 = vm->core_count; return true;
 
+	case vm_op_Fetch_And_Add_Byte: {
+		uint16_t v2 = *R2, v3 = *R3;
+		// TODO: actual locking/atomics
+		*R1 = vm->memory[v2];
+		vm->memory[v2] += v3;
+		return true;
+	}
+
 	case vm_op_Fault: CURRENT_CORE->fault = vm_fault_explicitly_requested; return true;
 	}
 
