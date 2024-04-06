@@ -6,14 +6,14 @@
 #include "ops.h"
 #include "vm.h"
 
-static void vm_push(vm_state *vm, uint16_t core_index, uint16_t value) {
+static void vm_push(vm_state *vm, uint8_t core_index, uint16_t value) {
 	vm->cores[core_index].registers[15] += 2;
 	uint16_t cursor = vm->cores[core_index].registers[15]; 
 	vm->memory[cursor + 1] = value >> 8;
 	vm->memory[cursor] = value & 0xff;
 }
 
-static uint16_t vm_pop(vm_state *vm, uint16_t core_index) {
+static uint16_t vm_pop(vm_state *vm, uint8_t core_index) {
 	uint16_t cursor = vm->cores[core_index].registers[15];
 	uint16_t result = (vm->memory[cursor + 1] << 8) | vm->memory[cursor];
 	vm->cores[core_index].registers[15] -= 2;
@@ -21,7 +21,7 @@ static uint16_t vm_pop(vm_state *vm, uint16_t core_index) {
 	return result;
 }
 
-void vm_init(vm_state *vm, uint16_t core_count, vm_core *cores) {
+void vm_init(vm_state *vm, uint8_t core_count, vm_core *cores) {
 	vm->core_count = core_count;
 	vm->cores = cores;
 	for (uint16_t i = 0; i < core_count; ++i)
@@ -122,7 +122,7 @@ char const *vm_disasm(uint8_t op, uint8_t b, uint8_t c) {
 	return buf;
 }
 
-char const *vm_disasm_pc(vm_state const *vm, uint16_t core_index) {
+char const *vm_disasm_pc(vm_state const *vm, uint8_t core_index) {
 	return vm_disasm(
 		vm->memory[vm->cores[core_index].pc],
 		vm->memory[vm->cores[core_index].pc + 1],
@@ -154,7 +154,7 @@ char const *vm_padded_reg_name(uint8_t n) {
 }
 
 
-static bool vm_step_impl(vm_state *vm, uint16_t core_index, uint8_t op, uint8_t b, uint8_t c) {
+static bool vm_step_impl(vm_state *vm, uint8_t core_index, uint8_t op, uint8_t b, uint8_t c) {
 	if (CURRENT_CORE->fault != vm_fault_none)
 		return false;
 
@@ -348,7 +348,7 @@ static bool vm_step_impl(vm_state *vm, uint16_t core_index, uint8_t op, uint8_t 
 	return false;
 }
 
-void vm_step(vm_state *vm, uint16_t core_index) {
+void vm_step(vm_state *vm, uint8_t core_index) {
 	if (CURRENT_CORE->fault != vm_fault_none) return;
 
 	uint8_t const op = vm->memory[CURRENT_CORE->pc];
