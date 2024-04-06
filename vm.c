@@ -158,6 +158,8 @@ static bool vm_step_impl(vm_state *vm, uint8_t core_index, uint8_t op, uint8_t b
 	if (CURRENT_CORE->fault != vm_fault_none)
 		return false;
 
+#define fault_if_same(a, b) if ((a) == (b)) do { CURRENT_CORE->fault = vm_fault_illegal_instruction; return false; } while (0)
+
 	switch (op) {
 	case vm_op_Nop: return true;
 
@@ -171,115 +173,64 @@ static bool vm_step_impl(vm_state *vm, uint8_t core_index, uint8_t op, uint8_t b
 
 	case vm_op_Rotate_2: {
 		uint16_t v1 = *R1, v2 = *R2;
-		*R1 = v2;
-		*R2 = v1;
+		*R1 = v2; *R2 = v1;
 		return true;
 	}
 
 	case vm_op_Rotate_3: {
 		uint16_t v1 = *R1, v2 = *R2, v3 = *R3;
-		*R1 = v2;
-		*R2 = v3;
-		*R3 = v1;
+		*R1 = v2; *R2 = v3; *R3 = v1;
 		return true;
 	}
 
 	case vm_op_Rotate_4: {
 		uint16_t v1 = *R1, v2 = *R2, v3 = *R3, v4 = *R4;
-		*R1 = v2;
-		*R2 = v3;
-		*R3 = v4;
-		*R4 = v1;
+		*R1 = v2; *R2 = v3; *R3 = v4; *R4 = v1;
 		return true;
 	}
 
-	case vm_op_Add: {
-		uint32_t result = *R3 + *R4;
-		*R1 = result >> 16;
-		*R2 = result & 0xffff;
-		return true;
-	}
+	case vm_op_Add:      { uint32_t result = *R3 + *R4; fault_if_same(R1, R2); *R1 = result >> 16; *R2 = result & 0xffff; return true; }
+	case vm_op_Subtract: { uint32_t result = *R3 - *R4; fault_if_same(R1, R2); *R1 = result >> 16; *R2 = result & 0xffff; return true; }
 
-	case vm_op_Increment: {
-		uint32_t result = *R2 + B2;
-		*R1 = result >> 16;
-		*R2 = result & 0xffff;
-		return true;
-	}
-
-	case vm_op_Decrement: {
-		uint32_t result = *R2 - B2;
-		*R1 = result >> 16;
-		*R2 = result & 0xffff;
-		return true;
-	}
-
-	case vm_op_Subtract: {
-		uint32_t result = *R3 - *R4;
-		*R1 = result >> 16;
-		*R2 = result & 0xffff;
-		return true;
-	}
+	case vm_op_Increment: { uint32_t result = *R2 + B2; fault_if_same(R1, R2); *R1 = result >> 16; *R2 = result & 0xffff; return true; }
+	case vm_op_Decrement: { uint32_t result = *R2 - B2; fault_if_same(R1, R2); *R1 = result >> 16; *R2 = result & 0xffff; return true; }
 
 	case vm_op_Unsigned_Multiply: {
 		uint32_t result = *R3 * *R4;
+		fault_if_same(R1, R2);
 		*R1 = result >> 16;
 		*R2 = result & 0xffff;
 		return true;
 	}
 
 	case vm_op_Signed_Multiply: {
-		union {
-			int32_t s;
-			uint32_t u;
-		} result = { .s = *SR3 * *SR4 };
+		union { int32_t s; uint32_t u; } result = { .s = *SR3 * *SR4 };
+		fault_if_same(R1, R2);
 		*R1 = result.u >> 16;
 		*R2 = result.u & 0xffff;
 		return true;
 	}
 
 	case vm_op_Unsigned_Divide: {
-		if (*R4 == 0) {
-			CURRENT_CORE->fault = vm_fault_divide_by_zero;
-			return true;
-		}
-		*R1 = *R3 / *R4;
-		*R2 = *R3 % *R4;
+		if (*R4 == 0) { CURRENT_CORE->fault = vm_fault_divide_by_zero; return true; }
+		fault_if_same(R1, R2);
+		*R1 = *R3 / *R4; *R2 = *R3 % *R4;
 		return true;
 	}
 
 	case vm_op_Signed_Divide: {
-		if (*R4 == 0) {
-			CURRENT_CORE->fault = vm_fault_divide_by_zero;
-			return true;
-		}
-		union {
-			int16_t s;
-			uint16_t u;
-		} div = { .s = *SR3 / *SR4 }, rem = { .s = *SR3 % *SR4 };
-		*R1 = div.u;
-		*R2 = rem.u;
+		if (*R4 == 0) { CURRENT_CORE->fault = vm_fault_divide_by_zero; return true; }
+		union { int16_t s; uint16_t u; }
+			div = { .s = *SR3 / *SR4 },
+			rem = { .s = *SR3 % *SR4 };
+		fault_if_same(R1, R2);
+		*R1 = div.u; *R2 = rem.u;
 		return true;
 	}
 
-	case vm_op_Compare_Signed: {
-		bool cmp = *SR3 <= *SR4;
-		*R1 = cmp;
-		*R2 = !cmp;
-		return true;
-	}
-	case vm_op_Compare_Unsigned: {
-		bool cmp = *R3 <= *R4;
-		*R1 = cmp;
-		*R2 = !cmp;
-		return true;
-	}
-	case vm_op_Compare_Equal: {
-		bool cmp = *R3 == *R4;
-		*R1 = cmp;
-		*R2 = !cmp;
-		return true;
-	}
+	case vm_op_Compare_Signed:   { bool cmp = *SR3 <= *SR4; fault_if_same(R1, R2); *R1 = cmp; *R2 = !cmp; return true; }
+	case vm_op_Compare_Unsigned: { bool cmp = *R3 <= *R4;   fault_if_same(R1, R2); *R1 = cmp; *R2 = !cmp; return true; }
+	case vm_op_Compare_Equal:    { bool cmp = *R3 == *R4;   fault_if_same(R1, R2); *R1 = cmp; *R2 = !cmp; return true; }
 
 	case vm_op_Branch_Immediate_Absolute: CURRENT_CORE->pc = D;     return false;
 	case vm_op_Branch_Immediate_Relative: CURRENT_CORE->pc += SD;   return false;
@@ -297,16 +248,8 @@ static bool vm_step_impl(vm_state *vm, uint8_t core_index, uint8_t op, uint8_t b
 	case vm_op_Push: vm_push(vm, core_index, *R1); return true;
 	case vm_op_Pop: *R1 = vm_pop(vm, core_index); return true;
 
-	case vm_op_Port_Write:
-		if (vm->ports.port_write)
-			vm->ports.port_write(vm->ports.context, B2, *R1);
-		// TODO: else fault
-		return true;
-	case vm_op_Port_Read:
-		if (vm->ports.port_read)
-			*R1 = vm->ports.port_read(vm->ports.context, B2);
-		// TODO: else fault
-		return true;
+	case vm_op_Port_Write: if (vm->ports.port_write) vm->ports.port_write(vm->ports.context, B2, *R1); return true;
+	case vm_op_Port_Read:  if (vm->ports.port_read)  *R1 = vm->ports.port_read(vm->ports.context, B2); return true;
 
 	case vm_op_Call_Immediate_Relative: {
 		uint16_t ret_addr = CURRENT_CORE->pc;

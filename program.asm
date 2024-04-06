@@ -13,7 +13,7 @@
 
 	; unlock other cores
 	ncores r1
-	dec r1 r1 1
+	dec r2 r1 1
 	wab r0 r1
 
 	; when other cores are done they will decrement init lock
