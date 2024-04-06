@@ -6,28 +6,33 @@
 #include "ops.h"
 #include "vm.h"
 
-static void vm_push(vm_state *vm, uint16_t value) {
-	vm->core.registers[15] += 2;
-	uint16_t cursor = vm->core.registers[15]; 
+static void vm_push(vm_state *vm, uint16_t core_index, uint16_t value) {
+	vm->cores[core_index].registers[15] += 2;
+	uint16_t cursor = vm->cores[core_index].registers[15]; 
 	vm->memory[cursor + 1] = value >> 8;
 	vm->memory[cursor] = value & 0xff;
 }
 
-static uint16_t vm_pop(vm_state *vm) {
-	uint16_t cursor = vm->core.registers[15];
+static uint16_t vm_pop(vm_state *vm, uint16_t core_index) {
+	uint16_t cursor = vm->cores[core_index].registers[15];
 	uint16_t result = (vm->memory[cursor + 1] << 8) | vm->memory[cursor];
-	vm->core.registers[15] -= 2;
+	vm->cores[core_index].registers[15] -= 2;
 
 	return result;
 }
 
-void vm_init(vm_state *vm) {
-	vm->core.pc = 0;
+void vm_init(vm_state *vm, uint16_t core_count, vm_core *cores) {
+	vm->core_count = core_count;
+	vm->cores = cores;
+	for (uint16_t i = 0; i < core_count; ++i)
+		vm->cores[i].pc = 0;
+
 	vm->ports = (vm_ports){
 		.context = NULL,
 		.port_read = NULL,
 		.port_write = NULL,
 	};
+
 	for (uint16_t i = 0; i < sizeof vm->memory; ++i)
 		vm->memory[i] = 0;
 }
@@ -64,15 +69,17 @@ char const *vm_fault_name(vm_fault f) {
 }
 
 
+#define CURRENT_CORE (&vm->cores[core_index])
+
 #define R1_id (b >> 4)
 #define R2_id (b & 0x0f)
 #define R3_id (c >> 4)
 #define R4_id (c & 0x0f)
 
-#define R1 (&vm->core.registers[R1_id])
-#define R2 (&vm->core.registers[R2_id])
-#define R3 (&vm->core.registers[R3_id])
-#define R4 (&vm->core.registers[R4_id])
+#define R1 (&CURRENT_CORE->registers[R1_id])
+#define R2 (&CURRENT_CORE->registers[R2_id])
+#define R3 (&CURRENT_CORE->registers[R3_id])
+#define R4 (&CURRENT_CORE->registers[R4_id])
 
 #define SR1 ((int8_t *)R1)
 #define SR2 ((int8_t *)R2)
@@ -114,8 +121,12 @@ char const *vm_disasm(uint8_t op, uint8_t b, uint8_t c) {
 	return buf;
 }
 
-char const *vm_disasm_pc(vm_state const *vm) {
-	return vm_disasm(vm->memory[vm->core.pc], vm->memory[vm->core.pc + 1], vm->memory[vm->core.pc + 2]);
+char const *vm_disasm_pc(vm_state const *vm, uint16_t core_index) {
+	return vm_disasm(
+		vm->memory[vm->cores[core_index].pc],
+		vm->memory[vm->cores[core_index].pc + 1],
+		vm->memory[vm->cores[core_index].pc + 2]
+	);
 }
 
 char const *vm_padded_reg_name(uint8_t n) {
@@ -142,8 +153,8 @@ char const *vm_padded_reg_name(uint8_t n) {
 }
 
 
-static bool vm_step_impl(vm_state *vm, uint8_t op, uint8_t b, uint8_t c) {
-	if (vm->core.fault != vm_fault_none)
+static bool vm_step_impl(vm_state *vm, uint16_t core_index, uint8_t op, uint8_t b, uint8_t c) {
+	if (CURRENT_CORE->fault != vm_fault_none)
 		return false;
 
 	switch (op) {
@@ -228,7 +239,7 @@ static bool vm_step_impl(vm_state *vm, uint8_t op, uint8_t b, uint8_t c) {
 
 	case vm_op_Unsigned_Divide: {
 		if (*R4 == 0) {
-			vm->core.fault = vm_fault_divide_by_zero;
+			CURRENT_CORE->fault = vm_fault_divide_by_zero;
 			return true;
 		}
 		*R1 = *R3 / *R4;
@@ -238,7 +249,7 @@ static bool vm_step_impl(vm_state *vm, uint8_t op, uint8_t b, uint8_t c) {
 
 	case vm_op_Signed_Divide: {
 		if (*R4 == 0) {
-			vm->core.fault = vm_fault_divide_by_zero;
+			CURRENT_CORE->fault = vm_fault_divide_by_zero;
 			return true;
 		}
 		union {
@@ -269,21 +280,21 @@ static bool vm_step_impl(vm_state *vm, uint8_t op, uint8_t b, uint8_t c) {
 		return true;
 	}
 
-	case vm_op_Branch_Immediate_Absolute: vm->core.pc = D;     return false;
-	case vm_op_Branch_Immediate_Relative: vm->core.pc += SD;   return false;
-	case vm_op_Branch_Absolute:           vm->core.pc = *R1;   return false;
-	case vm_op_Branch_Relative:           vm->core.pc += *SR1; return false;
+	case vm_op_Branch_Immediate_Absolute: CURRENT_CORE->pc = D;     return false;
+	case vm_op_Branch_Immediate_Relative: CURRENT_CORE->pc += SD;   return false;
+	case vm_op_Branch_Absolute:           CURRENT_CORE->pc = *R1;   return false;
+	case vm_op_Branch_Relative:           CURRENT_CORE->pc += *SR1; return false;
 
-	case vm_op_Skip_If_Zero:     if (*R1 == 0) vm->core.pc += 3; return true;
-	case vm_op_Skip_If_Non_Zero: if (*R1 != 0) vm->core.pc += 3; return true;
+	case vm_op_Skip_If_Zero:     if (*R1 == 0) CURRENT_CORE->pc += 3; return true;
+	case vm_op_Skip_If_Non_Zero: if (*R1 != 0) CURRENT_CORE->pc += 3; return true;
 
 	case vm_op_Read_Address_Byte:      *R1 = vm->memory[*R2]; return true;
 	case vm_op_Read_Address_Two_Byte:  *R1 = (vm->memory[*R2 + 1] << 8) | vm->memory[*R2]; return true;
 	case vm_op_Write_Address_Byte:     vm->memory[*R1] = *R2; return true;
 	case vm_op_Write_Address_Two_Byte: vm->memory[*R1] = *R2; vm->memory[*R1 + 1] = *R2 >> 8; return true;
 
-	case vm_op_Push: vm_push(vm, *R1); return true;
-	case vm_op_Pop: *R1 = vm_pop(vm); return true;
+	case vm_op_Push: vm_push(vm, core_index, *R1); return true;
+	case vm_op_Pop: *R1 = vm_pop(vm, core_index); return true;
 
 	case vm_op_Port_Write:
 		if (vm->ports.port_write)
@@ -297,48 +308,51 @@ static bool vm_step_impl(vm_state *vm, uint8_t op, uint8_t b, uint8_t c) {
 		return true;
 
 	case vm_op_Call_Immediate_Relative: {
-		uint16_t ret_addr = vm->core.pc;
-		vm_push(vm, ret_addr);
-		vm->core.pc += D;
+		uint16_t ret_addr = CURRENT_CORE->pc;
+		vm_push(vm, core_index, ret_addr);
+		CURRENT_CORE->pc += D;
 		return false;
 	}
 
 	case vm_op_Call_Immediate_Absolute: {
-		uint16_t ret_addr = vm->core.pc;
-		vm_push(vm, ret_addr);
-		vm->core.pc = D;
+		uint16_t ret_addr = CURRENT_CORE->pc;
+		vm_push(vm, core_index, ret_addr);
+		CURRENT_CORE->pc = D;
 		return false;
 	}
 
 	case vm_op_Call_Relative: {
-		uint16_t ret_addr = vm->core.pc;
-		vm_push(vm, ret_addr);
-		vm->core.pc += *SR1;
+		uint16_t ret_addr = CURRENT_CORE->pc;
+		vm_push(vm, core_index, ret_addr);
+		CURRENT_CORE->pc += *SR1;
 		return false;
 	}
 
 	case vm_op_Call_Absolute: {
-		uint16_t ret_addr = vm->core.pc;
-		vm_push(vm, ret_addr);
-		vm->core.pc = *R1;
+		uint16_t ret_addr = CURRENT_CORE->pc;
+		vm_push(vm, core_index, ret_addr);
+		CURRENT_CORE->pc = *R1;
 		return false;
 	}
 
-	case vm_op_Return: vm->core.pc = vm_pop(vm); return true;
+	case vm_op_Return: CURRENT_CORE->pc = vm_pop(vm, core_index); return true;
+
+	case vm_op_Core:        *R1 = core_index;     return true;
+	case vm_op_Count_Cores: *R1 = vm->core_count; return true;
 	}
 
-	vm->core.fault = vm_fault_illegal_instruction;
+	CURRENT_CORE->fault = vm_fault_illegal_instruction;
 	return false;
 }
 
-void vm_step(vm_state *vm) {
-	if (vm->core.fault != vm_fault_none) return;
+void vm_step(vm_state *vm, uint16_t core_index) {
+	if (CURRENT_CORE->fault != vm_fault_none) return;
 
-	uint8_t const op = vm->memory[vm->core.pc];
-	uint8_t const b = vm->memory[(uint16_t)(vm->core.pc + 1)];
-	uint8_t const c = vm->memory[(uint16_t)(vm->core.pc + 2)];
+	uint8_t const op = vm->memory[CURRENT_CORE->pc];
+	uint8_t const b = vm->memory[(uint16_t)(CURRENT_CORE->pc + 1)];
+	uint8_t const c = vm->memory[(uint16_t)(CURRENT_CORE->pc + 2)];
 
-	bool inc_pc = vm_step_impl(vm, op, b, c);
+	bool inc_pc = vm_step_impl(vm, core_index, op, b, c);
 
-	if (vm->core.fault == vm_fault_none && inc_pc) vm->core.pc += 3;
+	if (CURRENT_CORE->fault == vm_fault_none && inc_pc) CURRENT_CORE->pc += 3;
 }

@@ -15,7 +15,6 @@ int main(int argc, char **argv) {
 	common_port_state state;
 	vm_state vm;
 	vm_init(&vm);
-	initialize_extra(&vm, &state);
 
 	read_file_to_vm_memory(&vm, program);
 

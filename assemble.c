@@ -373,13 +373,15 @@ void assemble(sv contents) {
 
 		case asm_token_instruction:
 			if (state != state_any) fatal_pos(tk_pos, "Unexpected instruction name \"%s\"", vm_op_mnemonic(tk.u.instr.opcode));
+			write_byte(tk.u.instr.opcode);
 			current_encoding = tk.u.instr.encoding;
 			expected_operand_index = 0;
-			state = current_encoding == vm_operands_none
-				? state_any
-				: state_expect_operand;
-
-			write_byte(tk.u.instr.opcode);
+			if (current_encoding == vm_operands_none) {
+				state = state_any;
+				pad();
+			} else {
+				state = state_expect_operand;
+			}
 			continue;
 
 		case asm_token_position:

@@ -1,11 +1,5 @@
 #include <stdlib.h>
 
-// installs common ports and sets up stack pointer
-void initialize_extra(vm_state *vm, common_port_state *state) {
-	vm_install_common_ports(vm, state);
-	vm->core.registers[15] = 0xf000;
-}
-
 void read_file_to_vm_memory(vm_state *vm, char const *path) {
 	FILE *file = fopen(path, "rb");
 	if (!file) {

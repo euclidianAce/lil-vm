@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -9,33 +10,40 @@ static void show_delta(
 	vm_state const *prev,
 	vm_state const *now
 ) {
+	for (uint16_t i = 0; i < now->core_count; ++i) {
+		if (i > 0) printf("\n");
 
-	{
-		bool diff = now->core.pc != prev->core.pc;
-		if (diff) printf("\033[33m");
-		printf("  pc:%04x", now->core.pc);
-		if (diff) printf("\033[0m");
+		vm_core const *prev_core = &prev->cores[i];
+		vm_core const *now_core = &now->cores[i];
+
+		printf("  id:%04x", i);
+
+		{
+			bool diff = now_core->pc != prev_core->pc;
+			if (diff) printf("\033[33m");
+			printf("  pc:%04x", now_core->pc);
+			if (diff) printf("\033[0m");
+		}
+
+		{
+			bool diff = now_core->fault != prev_core->fault;
+			if (diff) printf("\033[33m");
+			printf("  fault:%x\n", now_core->fault);
+			if (diff) printf("\033[0m");
+		}
+
+		// always show registers, but highlight diffs
+		for (uint8_t i = 0; i < 16; ++i) {
+			bool diff = prev_core->registers[i] != now_core->registers[i];
+			if (diff) printf("\033[33m");
+			printf(" ");
+			printf("%s:%04x", vm_padded_reg_name(i), now_core->registers[i]);
+			if (diff) printf("\033[0m");
+			if (i == 7) printf("\n");
+		}
+
+		printf("\n");
 	}
-
-	{
-		bool diff = now->core.fault != prev->core.fault;
-		if (diff) printf("\033[33m");
-		printf("  fault:%x\n", now->core.fault);
-		if (diff) printf("\033[0m");
-	}
-
-	// always show registers, but highlight diffs
-
-	for (uint8_t i = 0; i < 16; ++i) {
-		bool diff = prev->core.registers[i] != now->core.registers[i];
-		if (diff) printf("\033[33m");
-		printf(" ");
-		printf("%s:%04x", vm_padded_reg_name(i), now->core.registers[i]);
-		if (diff) printf("\033[0m");
-		if (i == 7) printf("\n");
-	}
-
-	printf("\n");
 
 	bool first_mem_diff = true;
 
@@ -62,6 +70,12 @@ static void show_delta(
 
 #include "vm_utils.c"
 
+void copy_vm_state(vm_state *to, vm_state const *from) {
+	assert(from->core_count == to->core_count);
+	memcpy(to->cores, from->cores, from->core_count * sizeof(vm_core));
+	memcpy(to->memory, from->memory, sizeof from->memory);
+}
+
 int main(int argc, char **argv) {
 	if (argc != 2) {
 		fprintf(stderr, "Usage: stepper <program.asm>\n");
@@ -70,34 +84,49 @@ int main(int argc, char **argv) {
 
 	char const *file_name = argv[1];
 
+#define STATIC_CORE_COUNT 3
+
 	common_port_state state;
 	vm_state prev, now;
-	vm_init(&now);
-	initialize_extra(&now, &state);
+	vm_core prev_cores[STATIC_CORE_COUNT];
+	vm_core now_cores[STATIC_CORE_COUNT];
+	vm_init(&now, STATIC_CORE_COUNT, now_cores);
+	prev.cores = prev_cores;
+	prev.core_count = STATIC_CORE_COUNT;
+
+	vm_install_common_ports(&prev, &state);
+	vm_install_common_ports(&now, &state);
 
 	read_file_to_vm_memory(&now, file_name);
 
-	memcpy(&prev, &now, sizeof now);
+	copy_vm_state(&prev, &now);
+
 	show_delta(&prev, &now);
 
-	for (; !state.wrote_to_shut_down && now.core.fault == vm_fault_none;) {
+	for (uint16_t core_index = 0; !state.wrote_to_shut_down;) {
 		printf(
-			"\nNext instruction: \033[1m%s\033[0m (raw %02x %02x %02x)\nPress enter to continue, Control+C to quit.\n",
-			vm_disasm_pc(&now),
-			now.memory[now.core.pc],
-			now.memory[now.core.pc + 1],
-			now.memory[now.core.pc + 2]
+			"\nCore %u, Next instruction: \033[1m%s\033[0m (raw %02x %02x %02x)\nPress enter to continue, Control+C to quit.\n",
+			core_index,
+			vm_disasm_pc(&now, core_index),
+			now.memory[now.cores[core_index].pc],
+			now.memory[now.cores[core_index].pc + 1],
+			now.memory[now.cores[core_index].pc + 2]
 		);
 		getchar();
-		vm_step(&now);
+
+		vm_step(&now, core_index);
 		show_delta(&prev, &now);
-		memcpy(&prev, &now, sizeof now);
+		copy_vm_state(&prev, &now);
+
+		if (now.cores[core_index].fault != vm_fault_none) {
+			printf("Machine core %u faulted with fault %u (%s) at pc=%04x.\n", core_index, now.cores[core_index].fault, vm_fault_name(now.cores[core_index].fault), now.cores[core_index].pc);
+			return now.cores[core_index].fault;
+		}
+
+		core_index += 1;
+		core_index %= STATIC_CORE_COUNT;
 	}
 
 	if (state.wrote_to_shut_down)
 		printf("Machine requested shut down.\n");
-	if (now.core.fault != vm_fault_none) {
-		printf("Machine faulted with fault %u (%s) at pc=%04x.\n", now.core.fault, vm_fault_name(now.core.fault), now.core.pc);
-		return now.core.fault;
-	}
 }

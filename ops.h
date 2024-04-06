@@ -108,6 +108,9 @@ typedef enum vm_operands {
 	X(Call_Relative,              "callr",       r       ) /* push absolute return address, branch relative */ \
 	X(Call_Absolute,              "calla",       r       ) /* push absolute return address, branch absolute */ \
 	X(Return,                     "ret",         none    ) /* pop address, branch absolute */ \
+	/* Core Info */                                        \
+	X(Core,                       "core",        r       ) /* R1 <- current core id */ \
+	X(Count_Cores,                "ncores",      r       ) /* R1 <- total number of cores */ \
 
 
 // TODO:

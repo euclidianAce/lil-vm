@@ -27,14 +27,15 @@ typedef struct vm_ports {
 } vm_ports;
 
 typedef struct vm_state {
-	// TODO: multi core could be fun
-	vm_core core;
+	vm_core *cores;
+	uint16_t core_count;
+
 	vm_ports ports;
 	uint8_t memory[UINT16_MAX];
 } vm_state;
 
-void vm_init(vm_state *);
-void vm_step(vm_state *);
+void vm_init(vm_state *, uint16_t core_count, vm_core *cores);
+void vm_step(vm_state *, uint16_t core_index);
 
 char const *vm_padded_reg_name(uint8_t);
 
@@ -45,7 +46,7 @@ char const *vm_fault_name(vm_fault);
 
 // these point to mutable static memory
 char const *vm_disasm(uint8_t, uint8_t, uint8_t);
-char const *vm_disasm_pc(vm_state const *);
+char const *vm_disasm_pc(vm_state const *, uint16_t core_index);
 
 
 #endif // VM_H
