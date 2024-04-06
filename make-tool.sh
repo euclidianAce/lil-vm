@@ -4,7 +4,7 @@ set -e
 
 run_compiler () {
 	local common_objects="vm.c common_ports.c sv.c"
-	local invocation="cc -Wall -Wextra -Werror -pedantic -std=c99 $common_objects $1.c -o $1"
+	local invocation="cc -Wall -Wextra -Werror -pedantic -std=c11 $common_objects $1.c -o $1"
 	echo -ne "$1\t"
 	echo "$invocation"
 	$invocation

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
@@ -32,30 +33,27 @@ void vm_init(vm_state *vm, uint8_t core_count, vm_core *cores) {
 		.port_read = NULL,
 		.port_write = NULL,
 	};
-
-	for (uint16_t i = 0; i < sizeof vm->memory; ++i)
-		vm->memory[i] = 0;
 }
 
 char const *vm_op_name(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return #name;
 	switch (code) { vm_x_instructions(X) }
-#undef X
 	return "???";
+#undef X
 }
 
 char const *vm_op_mnemonic(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return mnemonic;
 	switch (code) { vm_x_instructions(X) }
-#undef X
 	return "???";
+#undef X
 }
 
 vm_operands vm_op_encoding(uint8_t code) {
 #define X(name, mnemonic, encoding) case vm_op_##name : return vm_operands_##encoding;
 	switch (code) { vm_x_instructions(X) }
-#undef X
 	return -1;
+#undef X
 }
 
 
@@ -285,10 +283,9 @@ static bool vm_step_impl(vm_state *vm, uint8_t core_index, uint8_t op, uint8_t b
 	case vm_op_Count_Cores: *R1 = vm->core_count; return true;
 
 	case vm_op_Fetch_And_Add_Byte: {
-		uint16_t v2 = *R2, v3 = *R3;
-		// TODO: actual locking/atomics
-		*R1 = vm->memory[v2];
-		vm->memory[v2] += v3;
+		uint16_t v2 = *R2;
+		uint8_t v3 = *R3;
+		*R1 = atomic_fetch_add_explicit(&vm->memory[v2], v3, memory_order_relaxed);
 		return true;
 	}
 
