@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include "sv.h"
 #include "vm.h"
 #include "mnemonics.h"
@@ -134,6 +135,9 @@ int main(int argc, char **argv) {
 
 	show_delta(&prev, &now);
 
+	// TODO: implement some better scheduling algorithms and let user select from cli
+	srand(time(0));
+
 	for (uint8_t core_index = 0; !state.wrote_to_shut_down;) {
 		printf(
 			"\nCore %u, Next instruction: \033[1m%s\033[0m (raw %02x %02x %02x)\nPress enter to continue, Control+C to quit.\n",
@@ -154,7 +158,7 @@ int main(int argc, char **argv) {
 			return now.cores[core_index].fault;
 		}
 
-		core_index += 1;
+		core_index += rand();
 		core_index %= core_count;
 	}
 

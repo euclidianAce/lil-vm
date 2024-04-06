@@ -22,6 +22,9 @@
 	sz r1
 	bia abs@main-spin
 
+	lib r0 10
+	portw r0 151
+
 	; power off
 	portw r0 #ff
 
