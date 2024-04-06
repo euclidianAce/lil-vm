@@ -22,6 +22,15 @@
 	exit(1); \
 } while (0)
 
+#define fatal_pos(in_pos, ...) do { \
+	pos _pos_ = (in_pos); \
+	fprintf(stderr, "%s:%u:%u: ", path, _pos_.line, _pos_.column); \
+	fprintf(stderr, __VA_ARGS__); \
+	fprintf(stderr, "\n"); \
+	exit(1); \
+} while (0)
+
+static char const *path = "";
 static char file_buf[4096];
 sv read_whole_file(char const *path) {
 	FILE *file = fopen(path, "r");
@@ -56,6 +65,18 @@ fail_and_exit: {}
 	fatal("Could not read file \"%s\": %s (error %d)\n", path, strerror(e), e);
 }
 
+typedef struct pos { uint32_t line, column; } pos;
+pos index_to_pos(sv contents, uint32_t index) {
+	pos result = { 1, 1 };
+	for (uint32_t i = 0; i < index; ++i) {
+		switch (contents.data[i]) {
+		case '\n': result.line += 1; result.column = 1; break;
+		default: result.column += 1; break;
+		}
+	}
+	return result;
+}
+
 typedef enum asm_token_kind {
 	asm_token_eof,
 	asm_token_dot,
@@ -72,6 +93,7 @@ typedef enum label_ref_part { all, hi, lo } label_ref_part;
 
 typedef struct asm_token {
 	asm_token_kind kind;
+	uint32_t index;
 	union {
 		uint32_t uint;
 		int32_t sint;
@@ -123,7 +145,7 @@ static inline uint8_t hex_digit_value(char c) {
 	return dec_digit_value(c);
 }
 
-asm_token next_token(sv *s) {
+asm_token next_token(sv *s, char const *base) {
 	sv_chop_whitespace(s);
 
 	while (sv_first(*s) == ';') {
@@ -134,15 +156,17 @@ asm_token next_token(sv *s) {
 	}
 
 	if (s->len == 0)
-		return (asm_token){ asm_token_eof, { 0 } };
+		return (asm_token){ asm_token_eof, s->data - base, { 0 } };
 
 	sv word = sv_chop_non_whitespace(s);
+	uint32_t const index = word.data - base;
+#define word_pos index_to_pos((sv){ 0xffff, base }, index)
 
-	if (sv_eq(word, sv_c("."))) return (asm_token){ asm_token_dot, { 0 } };
+	if (sv_eq(word, sv_c("."))) return (asm_token){ asm_token_dot, word.data - base, { 0 } };
 
 #define label(prefix, is_abs, p) if (sv_starts_with(word, sv_c(prefix))) do { \
 	sv_chop(&word, sizeof "" prefix - 1); \
-	return (asm_token){ asm_token_label_ref, { .label_ref = { \
+	return (asm_token){ asm_token_label_ref, index, { .label_ref = { \
 		.name = word, \
 		.absolute = is_abs, \
 		.part = p, \
@@ -159,38 +183,38 @@ asm_token next_token(sv *s) {
 	label("rello@", false, lo);
 
 	if (sv_first(word) == '@' && sv_last(word) == ':') {
-		if (word.len == 2) fatal("Invalid label definition \"" sv_fstr "\"", sv_farg(word));
+		if (word.len == 2) fatal_pos(word_pos, "Invalid label definition \"" sv_fstr "\"", sv_farg(word));
 		sv_chop(&word, 1);
 		sv_chop_end(&word, 1);
-		return (asm_token){ asm_token_label_def, { .str = word } };
+		return (asm_token){ asm_token_label_def, index, { .str = word } };
 	}
 
 	if (sv_first(word) == '>') {
 		sv full = word;
 		sv_chop_one(&word);
-		if (word.len != 4) { fatal("Invalid position \"" sv_fstr "\" (should have exactly 4 hex digits)", sv_farg(full)); }
+		if (word.len != 4) { fatal_pos(word_pos, "Invalid position \"" sv_fstr "\" (should have exactly 4 hex digits)", sv_farg(full)); }
 		for (uint32_t i = 0; i < word.len; ++i)
 			if (!hex_digit(word.data[i]))
-				fatal("Invalid digit '%c' in position \"" sv_fstr "\"", word.data[i], sv_farg(full));
+				fatal_pos(word_pos, "Invalid digit '%c' in position \"" sv_fstr "\"", word.data[i], sv_farg(full));
 
 		uint16_t result = 0;
 		for (uint8_t i = 0; i < word.len; ++i) {
 			result *= 16;
 			result += hex_digit_value(word.data[i]);
 		}
-		return (asm_token){ asm_token_position, { .uint = result } };
+		return (asm_token){ asm_token_position, index, { .uint = result } };
 	}
 
 	if (sv_first(word) == '#') {
 		sv full = word;
-		if (full.len != 3) { fatal("Invalid hex literal \"" sv_fstr "\" (should have exactly 2 digits)", sv_farg(full)); }
+		if (full.len != 3) { fatal_pos(word_pos, "Invalid hex literal \"" sv_fstr "\" (should have exactly 2 digits)", sv_farg(full)); }
 		sv_chop(&word, 1);
 
 		for (uint32_t i = 0; i < word.len; ++i)
 			if (!hex_digit(word.data[i]))
-				fatal("Invalid digit '%c' in hex literal \"" sv_fstr "\"", word.data[i], sv_farg(full));
+				fatal_pos(word_pos, "Invalid digit '%c' in hex literal \"" sv_fstr "\"", word.data[i], sv_farg(full));
 
-		return (asm_token){ asm_token_hex, { .uint = (hex_digit_value(word.data[0]) << 4) | hex_digit_value(word.data[1]) } };
+		return (asm_token){ asm_token_hex, index, { .uint = (hex_digit_value(word.data[0]) << 4) | hex_digit_value(word.data[1]) } };
 	}
 
 	if (dec_digit(sv_first(word))) {
@@ -200,7 +224,7 @@ asm_token next_token(sv *s) {
 			char digit = word.data[i];
 
 			if (!dec_digit(digit))
-				fatal("Invalid decimal digit '%c' in \"" sv_fstr "\"", digit, sv_farg(word));
+				fatal_pos(word_pos, "Invalid decimal digit '%c' in \"" sv_fstr "\"", digit, sv_farg(word));
 
 			result *= 10;
 			result += dec_digit_value(digit);
@@ -209,45 +233,36 @@ asm_token next_token(sv *s) {
 				overflow = true;
 		}
 		if (overflow)
-			fatal("Decimal number " sv_fstr " too large, (max of 65535 or 0xffff)", sv_farg(word));
-		return (asm_token){ asm_token_decimal, { .uint = result } };
+			fatal_pos(word_pos, "Decimal number " sv_fstr " too large, (max of 65535 or 0xffff)", sv_farg(word));
+		return (asm_token){ asm_token_decimal, index, { .uint = result } };
 	}
 
 	// Is this dumb? yes.
 	// Does it work? also yes.
-	if (sv_eq(word, sv_c("r0"))) return (asm_token){ asm_token_register_name, { .uint = 0 } };
-	if (sv_eq(word, sv_c("r1"))) return (asm_token){ asm_token_register_name, { .uint = 1 } };
-	if (sv_eq(word, sv_c("r2"))) return (asm_token){ asm_token_register_name, { .uint = 2 } };
-	if (sv_eq(word, sv_c("r3"))) return (asm_token){ asm_token_register_name, { .uint = 3 } };
-	if (sv_eq(word, sv_c("r4"))) return (asm_token){ asm_token_register_name, { .uint = 4 } };
-	if (sv_eq(word, sv_c("r5"))) return (asm_token){ asm_token_register_name, { .uint = 5 } };
-	if (sv_eq(word, sv_c("r6"))) return (asm_token){ asm_token_register_name, { .uint = 6 } };
-	if (sv_eq(word, sv_c("r7"))) return (asm_token){ asm_token_register_name, { .uint = 7 } };
-	if (sv_eq(word, sv_c("r8"))) return (asm_token){ asm_token_register_name, { .uint = 8 } };
-	if (sv_eq(word, sv_c("r9"))) return (asm_token){ asm_token_register_name, { .uint = 9 } };
-	if (sv_eq(word, sv_c("r10"))) return (asm_token){ asm_token_register_name, { .uint = 10 } };
-	if (sv_eq(word, sv_c("r11"))) return (asm_token){ asm_token_register_name, { .uint = 11 } };
-	if (sv_eq(word, sv_c("r12"))) return (asm_token){ asm_token_register_name, { .uint = 12 } };
-	if (sv_eq(word, sv_c("r13"))) return (asm_token){ asm_token_register_name, { .uint = 13 } };
-	if (sv_eq(word, sv_c("r14"))) return (asm_token){ asm_token_register_name, { .uint = 14 } };
-	if (sv_eq(word, sv_c("r15"))) return (asm_token){ asm_token_register_name, { .uint = 15 } };
+	if (sv_eq(word, sv_c("r0"))) return (asm_token){ asm_token_register_name,  index, { .uint = 0 } };
+	if (sv_eq(word, sv_c("r1"))) return (asm_token){ asm_token_register_name,  index, { .uint = 1 } };
+	if (sv_eq(word, sv_c("r2"))) return (asm_token){ asm_token_register_name,  index, { .uint = 2 } };
+	if (sv_eq(word, sv_c("r3"))) return (asm_token){ asm_token_register_name,  index, { .uint = 3 } };
+	if (sv_eq(word, sv_c("r4"))) return (asm_token){ asm_token_register_name,  index, { .uint = 4 } };
+	if (sv_eq(word, sv_c("r5"))) return (asm_token){ asm_token_register_name,  index, { .uint = 5 } };
+	if (sv_eq(word, sv_c("r6"))) return (asm_token){ asm_token_register_name,  index, { .uint = 6 } };
+	if (sv_eq(word, sv_c("r7"))) return (asm_token){ asm_token_register_name,  index, { .uint = 7 } };
+	if (sv_eq(word, sv_c("r8"))) return (asm_token){ asm_token_register_name,  index, { .uint = 8 } };
+	if (sv_eq(word, sv_c("r9"))) return (asm_token){ asm_token_register_name,  index, { .uint = 9 } };
+	if (sv_eq(word, sv_c("r10"))) return (asm_token){ asm_token_register_name, index, { .uint = 10 } };
+	if (sv_eq(word, sv_c("r11"))) return (asm_token){ asm_token_register_name, index, { .uint = 11 } };
+	if (sv_eq(word, sv_c("r12"))) return (asm_token){ asm_token_register_name, index, { .uint = 12 } };
+	if (sv_eq(word, sv_c("r13"))) return (asm_token){ asm_token_register_name, index, { .uint = 13 } };
+	if (sv_eq(word, sv_c("r14"))) return (asm_token){ asm_token_register_name, index, { .uint = 14 } };
+	if (sv_eq(word, sv_c("r15"))) return (asm_token){ asm_token_register_name, index, { .uint = 15 } };
 
 #define X(id, mnemonic, enc) \
 	if (sv_eq(word, sv_c(mnemonic))) \
-		return (asm_token){ asm_token_instruction, { .instr = { .opcode = vm_op_##id, .encoding = vm_operands_##enc } } };
+		return (asm_token){ asm_token_instruction, index, { .instr = { .opcode = vm_op_##id, .encoding = vm_operands_##enc } } };
 	vm_x_instructions(X)
 #undef X
 
-	fatal("Invalid token \"" sv_fstr "\"", sv_farg(word));
-}
-
-static_buf(char, characters, 4096);
-sv copy_sv(sv s) {
-	size_t offset = static_buf_count(characters);
-	static_buf_count(characters) += s.len;
-	char *result = &characters[offset];
-	memcpy(result, s.data, s.len);
-	return (sv){ s.len, result };
+	fatal_pos(word_pos, "Invalid token \"" sv_fstr "\"", sv_farg(word));
 }
 
 static uint8_t out_buf[0xffff];
@@ -290,7 +305,7 @@ asm_label *add_label(sv name) {
 	if (find_label(name))
 		fatal("Redefinition of label \"" sv_fstr "\"", sv_farg(name));
 	asm_label *result = static_buf_add(labels);
-	result->name = copy_sv(name);
+	result->name = name;
 	result->offset = current_offset();
 	return result;
 }
@@ -345,26 +360,30 @@ void assemble(sv contents) {
 		state_expect_operand,
 	} state = state_any;
 
+	sv const base = contents;
 	for (;;) {
-		asm_token tk = next_token(&contents);
+		asm_token tk = next_token(&contents, base.data);
+#define tk_pos index_to_pos(base, tk.index)
 
 		switch (tk.kind) {
 		case asm_token_eof:
 			if (state != state_any)
-				fatal("Unexpected end of file");
+				fatal_pos(tk_pos, "Unexpected end of file");
 			return;
 
 		case asm_token_instruction:
-			if (state != state_any) fatal("Unexpected instruction name \"%s\"", vm_op_mnemonic(tk.u.instr.opcode));
+			if (state != state_any) fatal_pos(tk_pos, "Unexpected instruction name \"%s\"", vm_op_mnemonic(tk.u.instr.opcode));
 			current_encoding = tk.u.instr.encoding;
 			expected_operand_index = 0;
-			state = state_expect_operand;
+			state = current_encoding == vm_operands_none
+				? state_any
+				: state_expect_operand;
 
 			write_byte(tk.u.instr.opcode);
 			continue;
 
 		case asm_token_position:
-			if (state != state_any) fatal("Unexpected position");
+			if (state != state_any) fatal_pos(tk_pos, "Unexpected position");
 			out_cursor = out_buf + tk.u.uint;
 			break;
 
@@ -373,7 +392,7 @@ void assemble(sv contents) {
 			switch (expected_operand) {
 			case operand_byte:
 				if (to_write > 255)
-					fatal("Expected a byte, but current offset (.) is too large (%u)", to_write);
+					fatal_pos(tk_pos, "Expected a byte, but current offset (.) is too large (%u)", to_write);
 				write_byte((uint8_t)to_write);
 				break;
 			case operand_double_byte:
@@ -382,7 +401,7 @@ void assemble(sv contents) {
 				break;
 			default: {
 				sv expected_name = operand_name(expected_operand);
-				fatal("Unexpected ., expected " sv_fstr, sv_farg(expected_name));
+				fatal_pos(tk_pos, "Unexpected ., expected " sv_fstr, sv_farg(expected_name));
 			}
 			}
 			break;
@@ -391,7 +410,7 @@ void assemble(sv contents) {
 		case asm_token_register_name:
 			if (expected_operand != operand_register) {
 				sv expected_name = operand_name(expected_operand);
-				fatal("Unexpected register name, expected " sv_fstr, sv_farg(expected_name));
+				fatal_pos(tk_pos, "Unexpected register name, expected " sv_fstr, sv_farg(expected_name));
 			}
 			if (expected_operand_index % 2 == 0) {
 				write_byte((uint8_t)tk.u.uint << 4);
@@ -404,7 +423,7 @@ void assemble(sv contents) {
 			switch (expected_operand) {
 			case operand_byte:
 				if (tk.u.uint > 255)
-					fatal("Expected a byte, but %u is too large", tk.u.uint);
+					fatal_pos(tk_pos, "Expected a byte, but %u is too large", tk.u.uint);
 				write_byte((uint8_t)tk.u.uint);
 				break;
 			case operand_double_byte:
@@ -413,7 +432,7 @@ void assemble(sv contents) {
 				break;
 			default: {
 				sv expected_name = operand_name(expected_operand);
-				fatal("Unexpected dec number, expected " sv_fstr, sv_farg(expected_name));
+				fatal_pos(tk_pos, "Unexpected dec number, expected " sv_fstr, sv_farg(expected_name));
 			}
 			}
 			break;
@@ -434,7 +453,7 @@ void assemble(sv contents) {
 				break;
 			default: {
 				sv expected_name = operand_name(expected_operand);
-				fatal("Unexpected hex number, expected " sv_fstr, sv_farg(expected_name));
+				fatal_pos(tk_pos, "Unexpected hex number, expected " sv_fstr, sv_farg(expected_name));
 			}
 			}
 			break;
@@ -442,13 +461,13 @@ void assemble(sv contents) {
 		case asm_token_label_ref: {
 			// TODO: allow half labels in double byte ops
 			if (state != state_expect_operand)
-				fatal("Unexpected label ref");
+				fatal_pos(tk_pos, "Unexpected label ref");
 
 			if (expected_operand == operand_double_byte && tk.u.label_ref.part != all)
-				fatal("Expected full label ref, got half label ref");
+				fatal_pos(tk_pos, "Expected full label ref, got half label ref");
 
 			if (expected_operand == operand_byte && tk.u.label_ref.part == all)
-				fatal("Expected half label ref, got full label ref");
+				fatal_pos(tk_pos, "Expected half label ref, got full label ref");
 
 			asm_patch *patch = static_buf_add(patches);
 			*patch = (asm_patch) {
@@ -469,7 +488,7 @@ void assemble(sv contents) {
 		}
 
 		case asm_token_label_def: {
-			if (state != state_any) fatal("Unexpected label definition");
+			if (state != state_any) fatal_pos(tk_pos, "Unexpected label definition");
 			add_label(tk.u.str);
 			break;
 		}
@@ -477,7 +496,7 @@ void assemble(sv contents) {
 
 		if (state == state_expect_operand) {
 			++expected_operand_index;
-			if (expected_operand == operand_none) {
+			if (expected_operand_index >= 4 || expected_operand == operand_none) {
 				state = state_any;
 				pad();
 			}
@@ -527,10 +546,10 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	char const *file_name = argv[1];
+	path = argv[1];
 	char const *out_file_name = argc == 3 ? argv[2] : "out";
 
-	sv contents = read_whole_file(file_name);
+	sv contents = read_whole_file(path);
 	assemble(contents);
 	apply_patches();
 
