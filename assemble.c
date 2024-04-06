@@ -87,6 +87,9 @@ typedef enum asm_token_kind {
 	asm_token_label_ref,
 	asm_token_label_def,
 	asm_token_position,
+	asm_token_macro,
+	asm_token_macro_start,
+	asm_token_macro_end,
 } asm_token_kind;
 
 typedef enum label_ref_part { all, hi, lo } label_ref_part;
@@ -163,6 +166,7 @@ asm_token next_token(sv *s, char const *base) {
 #define word_pos index_to_pos((sv){ 0xffff, base }, index)
 
 	if (sv_eq(word, sv_c("."))) return (asm_token){ asm_token_dot, word.data - base, { 0 } };
+	if (sv_eq(word, sv_c(")"))) return (asm_token){ asm_token_macro_end, word.data - base, { 0 } };
 
 #define label(prefix, is_abs, p) if (sv_starts_with(word, sv_c(prefix))) do { \
 	sv_chop(&word, sizeof "" prefix - 1); \
@@ -181,6 +185,18 @@ asm_token next_token(sv *s, char const *base) {
 	// TODO: does it even make sense to have these?
 	label("relhi@", false, hi);
 	label("rello@", false, lo);
+
+	if (sv_first(word) == '%') {
+		sv_chop(&word, 1);
+		if (sv_last(word) == '(') {
+			if (word.len == 2) fatal_pos(word_pos, "Invalid macro definition \"" sv_fstr "\"", sv_farg(word));
+			sv_chop_end(&word, 1);
+			return (asm_token){ asm_token_macro_start, index, { .str = word } };
+		} else {
+			if (word.len == 1) fatal_pos(word_pos, "Invalid macro \"" sv_fstr "\"", sv_farg(word));
+			return (asm_token){ asm_token_macro, index, { .str = word } };
+		}
+	}
 
 	if (sv_first(word) == '@' && sv_last(word) == ':') {
 		if (word.len == 2) fatal_pos(word_pos, "Invalid label definition \"" sv_fstr "\"", sv_farg(word));
@@ -338,171 +354,263 @@ sv operand_name(operand o) {
 	return sv_c("???");
 }
 
-void assemble(sv contents) {
-	vm_operands current_encoding = vm_operands_none;
-	uint8_t expected_operand_index = 0;
-	static operand const encoding_table[9][4] = {
-		[vm_operands_none] = { operand_none,        operand_none,     operand_none,     operand_none },
-		[vm_operands_rrrr] = { operand_register,    operand_register, operand_register, operand_register },
-		[vm_operands_rrr]  = { operand_register,    operand_register, operand_register, operand_none },
-		[vm_operands_rr]   = { operand_register,    operand_register, operand_none,     operand_none },
-		[vm_operands_r]    = { operand_register,    operand_none,     operand_none,     operand_none },
-		[vm_operands_rrb]  = { operand_register,    operand_register, operand_byte,     operand_none },
-		[vm_operands_rb]   = { operand_register,    operand_byte,     operand_none,     operand_none },
-		[vm_operands_bb]   = { operand_byte,        operand_byte,     operand_none,     operand_none },
-		[vm_operands_d]    = { operand_double_byte, operand_none,     operand_none,     operand_none },
-	};
+static_buf(asm_token, macro_tokens, 1024);
+typedef struct asm_macro {
+	sv name;
+	uint16_t count;
+	asm_token *tokens;
+} asm_macro;
+static_buf(asm_macro, macro_defs, 128);
+
+asm_macro const *find_macro(sv name) {
+	for (size_t i = 0; i < static_buf_count(macro_defs); ++i)
+		if (sv_eq(name, macro_defs[i].name))
+			return &macro_defs[i];
+	return NULL;
+}
+
+asm_macro *add_macro(sv name, sv base, uint32_t index) {
+	if (find_macro(name)) fatal_pos(index_to_pos(base, index), "Redefinition of macro \"" sv_fstr "\"", sv_farg(name));
+	asm_macro *result = static_buf_add(macro_defs);
+	result->name = name;
+	return result;
+}
+
+asm_macro *current_macro = NULL;
+vm_operands current_encoding = vm_operands_none;
+uint8_t expected_operand_index = 0;
+static operand const encoding_table[9][4] = {
+	[vm_operands_none] = { operand_none,        operand_none,     operand_none,     operand_none },
+	[vm_operands_rrrr] = { operand_register,    operand_register, operand_register, operand_register },
+	[vm_operands_rrr]  = { operand_register,    operand_register, operand_register, operand_none },
+	[vm_operands_rr]   = { operand_register,    operand_register, operand_none,     operand_none },
+	[vm_operands_r]    = { operand_register,    operand_none,     operand_none,     operand_none },
+	[vm_operands_rrb]  = { operand_register,    operand_register, operand_byte,     operand_none },
+	[vm_operands_rb]   = { operand_register,    operand_byte,     operand_none,     operand_none },
+	[vm_operands_bb]   = { operand_byte,        operand_byte,     operand_none,     operand_none },
+	[vm_operands_d]    = { operand_double_byte, operand_none,     operand_none,     operand_none },
+};
 
 #define expected_operand encoding_table[current_encoding][expected_operand_index]
 
-	enum {
-		state_any,
-		state_expect_operand,
-	} state = state_any;
+enum {
+	state_any,
+	state_expect_operand,
+	state_in_macro_def,
+} state = state_any;
 
+bool in_macro_invocation = false;
+
+bool process_token(asm_token tk, sv base) {
+#define tk_pos index_to_pos(base, tk.index)
+
+	if (state == state_in_macro_def) {
+		switch (tk.kind) {
+		case asm_token_macro_end:
+			state = state_any;
+			static_buf_count(macro_tokens) += current_macro->count;
+			current_macro = NULL;
+			break;
+
+		case asm_token_macro_start:
+			fatal_pos(tk_pos, "Nested macro definitions are not allowed");
+			break;
+
+		case asm_token_macro:
+			if (sv_eq(tk.u.str, current_macro->name))
+				fatal_pos(tk_pos, "A macro may not invoke itself");
+
+			{
+				asm_macro const *other = find_macro(tk.u.str);
+				if (!other)
+					fatal_pos(tk_pos, "Invocation of undefined macro");
+
+				for (uint32_t i = 0; i < other->count; ++i)
+					current_macro->tokens[current_macro->count++] = other->tokens[i];
+			}
+
+			break;
+
+		default:
+			current_macro->tokens[current_macro->count++] = tk;
+			break;
+		}
+
+		return false;
+	}
+
+	switch (tk.kind) {
+	case asm_token_eof:
+		if (state != state_any)
+			fatal_pos(tk_pos, "Unexpected end of file");
+		return true;
+
+	case asm_token_macro: {
+		asm_macro const *invoked = find_macro(tk.u.str);
+		if (!invoked)
+			fatal_pos(tk_pos, "Unknown macro \"%%" sv_fstr "\"", sv_farg(tk.u.str));
+
+		in_macro_invocation = true;
+		for (uint16_t i = 0; i < invoked->count; ++i)
+			process_token(invoked->tokens[i], base);
+		in_macro_invocation = false;
+
+		break;
+	}
+
+	case asm_token_macro_end:
+		fatal_pos(tk_pos, "Unexpected macro close");
+
+	case asm_token_macro_start:
+		if (state != state_any)
+			fatal_pos(tk_pos, "Unexpected macro definition");
+		current_macro = add_macro(tk.u.str, base, tk.index);
+		current_macro->count = 0;
+		current_macro->tokens = &macro_tokens[static_buf_count(macro_tokens)];
+		state = state_in_macro_def;
+		break;
+
+	case asm_token_instruction:
+		if (state != state_any) fatal_pos(tk_pos, "Unexpected instruction name \"%s\"", vm_op_mnemonic(tk.u.instr.opcode));
+		write_byte(tk.u.instr.opcode);
+		current_encoding = tk.u.instr.encoding;
+		expected_operand_index = 0;
+		if (current_encoding == vm_operands_none) {
+			state = state_any;
+			pad();
+		} else {
+			state = state_expect_operand;
+		}
+		return false;
+
+	case asm_token_position:
+		if (state != state_any) fatal_pos(tk_pos, "Unexpected position");
+		out_cursor = out_buf + tk.u.uint;
+		break;
+
+	case asm_token_dot: {
+		uint16_t to_write = current_aligned_offset();
+		switch (expected_operand) {
+		case operand_byte:
+			if (to_write > 255)
+				fatal_pos(tk_pos, "Expected a byte, but current offset (.) is too large (%u)", to_write);
+			write_byte((uint8_t)to_write);
+			break;
+		case operand_double_byte:
+			write_byte(to_write >> 8);
+			write_byte((uint8_t)to_write);
+			break;
+		default: {
+			sv expected_name = operand_name(expected_operand);
+			fatal_pos(tk_pos, "Unexpected ., expected " sv_fstr, sv_farg(expected_name));
+		}
+		}
+		break;
+	}
+
+	case asm_token_register_name:
+		if (expected_operand != operand_register) {
+			sv expected_name = operand_name(expected_operand);
+			fatal_pos(tk_pos, "Unexpected register name, expected " sv_fstr, sv_farg(expected_name));
+		}
+		if (expected_operand_index % 2 == 0) {
+			write_byte((uint8_t)tk.u.uint << 4);
+		} else {
+			*last_byte_written() |= (uint8_t)tk.u.uint;
+		}
+		break;
+
+	case asm_token_decimal:
+		switch (expected_operand) {
+		case operand_byte:
+			if (tk.u.uint > 255)
+				fatal_pos(tk_pos, "Expected a byte, but %u is too large", tk.u.uint);
+			write_byte((uint8_t)tk.u.uint);
+			break;
+		case operand_double_byte:
+			write_byte((uint16_t)tk.u.uint >> 8);
+			write_byte((uint8_t)tk.u.uint);
+			break;
+		default: {
+			sv expected_name = operand_name(expected_operand);
+			fatal_pos(tk_pos, "Unexpected dec number, expected " sv_fstr, sv_farg(expected_name));
+		}
+		}
+		break;
+
+	case asm_token_hex:
+		if (state == state_any) {
+			write_byte((uint8_t)tk.u.uint);
+			break;
+		}
+
+		switch (expected_operand) {
+		case operand_byte:
+			write_byte((uint8_t)tk.u.uint);
+			break;
+		case operand_double_byte:
+			write_byte(0);
+			write_byte((uint8_t)tk.u.uint);
+			break;
+		default: {
+			sv expected_name = operand_name(expected_operand);
+			fatal_pos(tk_pos, "Unexpected hex number, expected " sv_fstr, sv_farg(expected_name));
+		}
+		}
+		break;
+
+	case asm_token_label_ref: {
+		// TODO: allow half labels in double byte ops
+		if (state != state_expect_operand)
+			fatal_pos(tk_pos, "Unexpected label ref");
+
+		if (expected_operand == operand_double_byte && tk.u.label_ref.part != all)
+			fatal_pos(tk_pos, "Expected full label ref, got half label ref");
+
+		if (expected_operand == operand_byte && tk.u.label_ref.part == all)
+			fatal_pos(tk_pos, "Expected half label ref, got full label ref");
+
+		asm_patch *patch = static_buf_add(patches);
+		*patch = (asm_patch) {
+			.absolute = tk.u.label_ref.absolute,
+			.offset_to_be_relative_to = current_aligned_offset(),
+			.name = tk.u.label_ref.name,
+			.offset_to_patch = current_offset(),
+			.part = tk.u.label_ref.part,
+		};
+
+		switch (expected_operand) {
+		case operand_double_byte: write_byte(0xff); write_byte(0xff); break;
+		case operand_byte: write_byte(0xff); break;
+		default: break;
+		}
+
+		break;
+	}
+
+	case asm_token_label_def: {
+		if (state != state_any) fatal_pos(tk_pos, "Unexpected label definition");
+		add_label(tk.u.str);
+		break;
+	}
+	}
+
+	if (state == state_expect_operand) {
+		++expected_operand_index;
+		if (expected_operand_index >= 4 || expected_operand == operand_none) {
+			state = state_any;
+			pad();
+		}
+	}
+
+	return false;
+}
+
+void assemble(sv contents) {
 	sv const base = contents;
 	for (;;) {
 		asm_token tk = next_token(&contents, base.data);
-#define tk_pos index_to_pos(base, tk.index)
-
-		switch (tk.kind) {
-		case asm_token_eof:
-			if (state != state_any)
-				fatal_pos(tk_pos, "Unexpected end of file");
-			return;
-
-		case asm_token_instruction:
-			if (state != state_any) fatal_pos(tk_pos, "Unexpected instruction name \"%s\"", vm_op_mnemonic(tk.u.instr.opcode));
-			write_byte(tk.u.instr.opcode);
-			current_encoding = tk.u.instr.encoding;
-			expected_operand_index = 0;
-			if (current_encoding == vm_operands_none) {
-				state = state_any;
-				pad();
-			} else {
-				state = state_expect_operand;
-			}
-			continue;
-
-		case asm_token_position:
-			if (state != state_any) fatal_pos(tk_pos, "Unexpected position");
-			out_cursor = out_buf + tk.u.uint;
-			break;
-
-		case asm_token_dot: {
-			uint16_t to_write = current_aligned_offset();
-			switch (expected_operand) {
-			case operand_byte:
-				if (to_write > 255)
-					fatal_pos(tk_pos, "Expected a byte, but current offset (.) is too large (%u)", to_write);
-				write_byte((uint8_t)to_write);
-				break;
-			case operand_double_byte:
-				write_byte(to_write >> 8);
-				write_byte((uint8_t)to_write);
-				break;
-			default: {
-				sv expected_name = operand_name(expected_operand);
-				fatal_pos(tk_pos, "Unexpected ., expected " sv_fstr, sv_farg(expected_name));
-			}
-			}
-			break;
-		}
-
-		case asm_token_register_name:
-			if (expected_operand != operand_register) {
-				sv expected_name = operand_name(expected_operand);
-				fatal_pos(tk_pos, "Unexpected register name, expected " sv_fstr, sv_farg(expected_name));
-			}
-			if (expected_operand_index % 2 == 0) {
-				write_byte((uint8_t)tk.u.uint << 4);
-			} else {
-				*last_byte_written() |= (uint8_t)tk.u.uint;
-			}
-			break;
-
-		case asm_token_decimal:
-			switch (expected_operand) {
-			case operand_byte:
-				if (tk.u.uint > 255)
-					fatal_pos(tk_pos, "Expected a byte, but %u is too large", tk.u.uint);
-				write_byte((uint8_t)tk.u.uint);
-				break;
-			case operand_double_byte:
-				write_byte((uint16_t)tk.u.uint >> 8);
-				write_byte((uint8_t)tk.u.uint);
-				break;
-			default: {
-				sv expected_name = operand_name(expected_operand);
-				fatal_pos(tk_pos, "Unexpected dec number, expected " sv_fstr, sv_farg(expected_name));
-			}
-			}
-			break;
-
-		case asm_token_hex:
-			if (state == state_any) {
-				write_byte((uint8_t)tk.u.uint);
-				break;
-			}
-
-			switch (expected_operand) {
-			case operand_byte:
-				write_byte((uint8_t)tk.u.uint);
-				break;
-			case operand_double_byte:
-				write_byte(0);
-				write_byte((uint8_t)tk.u.uint);
-				break;
-			default: {
-				sv expected_name = operand_name(expected_operand);
-				fatal_pos(tk_pos, "Unexpected hex number, expected " sv_fstr, sv_farg(expected_name));
-			}
-			}
-			break;
-
-		case asm_token_label_ref: {
-			// TODO: allow half labels in double byte ops
-			if (state != state_expect_operand)
-				fatal_pos(tk_pos, "Unexpected label ref");
-
-			if (expected_operand == operand_double_byte && tk.u.label_ref.part != all)
-				fatal_pos(tk_pos, "Expected full label ref, got half label ref");
-
-			if (expected_operand == operand_byte && tk.u.label_ref.part == all)
-				fatal_pos(tk_pos, "Expected half label ref, got full label ref");
-
-			asm_patch *patch = static_buf_add(patches);
-			*patch = (asm_patch) {
-				.absolute = tk.u.label_ref.absolute,
-				.offset_to_be_relative_to = current_aligned_offset(),
-				.name = tk.u.label_ref.name,
-				.offset_to_patch = current_offset(),
-				.part = tk.u.label_ref.part,
-			};
-
-			switch (expected_operand) {
-			case operand_double_byte: write_byte(0xff); write_byte(0xff); break;
-			case operand_byte: write_byte(0xff); break;
-			default: break;
-			}
-
-			break;
-		}
-
-		case asm_token_label_def: {
-			if (state != state_any) fatal_pos(tk_pos, "Unexpected label definition");
-			add_label(tk.u.str);
-			break;
-		}
-		}
-
-		if (state == state_expect_operand) {
-			++expected_operand_index;
-			if (expected_operand_index >= 4 || expected_operand == operand_none) {
-				state = state_any;
-				pad();
-			}
-		}
+		if (process_token(tk, base)) break;
 	}
 }
 
