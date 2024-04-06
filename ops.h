@@ -111,6 +111,7 @@ typedef enum vm_operands {
 	/* Core Info */                                        \
 	X(Core,                       "core",        r       ) /* R1 <- current core id */ \
 	X(Count_Cores,                "ncores",      r       ) /* R1 <- total number of cores */ \
+	X(Fault,                      "fault",       none    ) /* trigger a manual fault */ \
 
 
 // TODO:

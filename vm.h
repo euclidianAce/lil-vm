@@ -5,9 +5,11 @@
 #include "ops.h"
 
 typedef enum vm_fault {
-	vm_fault_none = 0x00,
-	vm_fault_illegal_instruction,
-	vm_fault_divide_by_zero,
+	vm_fault_none                  = 0x0,
+	vm_fault_illegal_instruction   = 0x1,
+	vm_fault_divide_by_zero        = 0x2,
+
+	vm_fault_explicitly_requested  = 0xf,
 } vm_fault;
 
 typedef struct vm_core {

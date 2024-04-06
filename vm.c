@@ -64,6 +64,7 @@ char const *vm_fault_name(vm_fault f) {
 	case vm_fault_none: return "none";
 	case vm_fault_illegal_instruction: return "illegal instruction";
 	case vm_fault_divide_by_zero: return "divide by zero";
+	case vm_fault_explicitly_requested: return "explicitly requested";
 	}
 	return "???";
 }
@@ -339,6 +340,8 @@ static bool vm_step_impl(vm_state *vm, uint16_t core_index, uint8_t op, uint8_t 
 
 	case vm_op_Core:        *R1 = core_index;     return true;
 	case vm_op_Count_Cores: *R1 = vm->core_count; return true;
+
+	case vm_op_Fault: CURRENT_CORE->fault = vm_fault_explicitly_requested; return true;
 	}
 
 	CURRENT_CORE->fault = vm_fault_illegal_instruction;
