@@ -50,5 +50,4 @@ char const *vm_fault_name(vm_fault);
 char const *vm_disasm(uint8_t, uint8_t, uint8_t);
 char const *vm_disasm_pc(vm_state const *, uint8_t core_index);
 
-
 #endif // VM_H
